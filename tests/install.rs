@@ -205,3 +205,48 @@ fn doctor_flags_unwritable_store() {
     assert_eq!(data["healthy"], false);
     assert!(!check_ok(&data, "store"));
 }
+
+/// `--harness` restricts install (and uninstall) to the named harness; every
+/// other detected harness is left untouched. (Documented flag, previously
+/// untested — every other test passes `None`.)
+#[test]
+fn harness_filter_restricts_install_and_uninstall() {
+    let env = IsolatedEnv::new().with_claude().with_codex();
+
+    let r = papercut::commands::install::run(InstallArgs {
+        yes: true,
+        harness: Some("claude-code".into()),
+    });
+    let data = match r {
+        RunResult::Ok { data, .. } => data,
+        RunResult::Err(e) => panic!("install failed: {e:?}"),
+    };
+    let installed: Vec<&str> = data["installed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["harness"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        installed,
+        vec!["claude-code"],
+        "only the filtered harness installs"
+    );
+
+    // claude-code got the block; codex's file was never created/touched.
+    let claude_md = std::fs::read_to_string(env.home.join(".claude/CLAUDE.md")).unwrap();
+    assert!(claude_md.contains("papercut:begin v1"));
+    let codex_md = std::fs::read_to_string(env.home.join(".codex/AGENTS.md")).unwrap_or_default();
+    assert!(
+        !codex_md.contains("papercut"),
+        "codex untouched by a claude-code-only install"
+    );
+
+    // The same filter scopes uninstall to claude-code only.
+    uninstall(Some("claude-code"));
+    let after = std::fs::read_to_string(env.home.join(".claude/CLAUDE.md")).unwrap();
+    assert!(
+        !after.contains("papercut"),
+        "filtered uninstall removed the block"
+    );
+}
