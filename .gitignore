@@ -1,0 +1,13 @@
+# Rust build artifacts (Cargo.lock stays committed — this is a binary crate)
+/target/
+
+# macOS
+.DS_Store
+
+# Editor droppings
+*.swp
+.idea/
+.vscode/
+
+# Local scratch — never commit real papercut stores or test HOME dirs
+/tmp/

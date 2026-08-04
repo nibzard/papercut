@@ -61,6 +61,28 @@ validation; the "malformed input must never crash" requirements fall out natural
 Crate policy — keep it boring: `clap`, `serde`/`serde_json`, `ulid`, `anyhow`. No
 async runtime; this is sequential file I/O.
 
+### Agent-facing contract
+
+The primary caller of this CLI is an agent, so the agent path is first-class:
+
+- **`--help` is a contract**: usage, flags, examples, output modes, exit codes —
+  complete and stable. The managed-block instruction is one line; `--help` is the
+  only other documentation an agent gets.
+- **`--output json` on every command**, one minimal envelope shape across all of
+  them: `schema_version`, `status`, `data`, `errors[]` (each with machine-readable
+  `code`, `retryable`, and a bounded `hint`). `add` prints the event id in both
+  output modes so the agent can reference it. Human default stays terse text; no
+  spinners or progress bars in any mode.
+- **Deterministic exit codes**: 0 = success, 1 = real failure (report NOT
+  recorded), 2 = usage error. The CLI is honest about failure — only the hook
+  path swallows errors; an agent must be able to tell its report wasn't saved.
+- **Non-interactive always**: no prompts on any command; `install` takes `--yes`.
+- **`triage-pack` is model-facing output** — token-budget-aware by design, not a
+  human report that happens to get pasted into a prompt.
+- **Deliberately skipped**: idempotency keys (duplicate events are evidence by
+  design), sessions/replay (no state of its own to resume), `--strict` (nothing
+  falls back silently). The recovery story is `doctor` instead.
+
 Core commands:
 
 | Command | Purpose |
@@ -70,6 +92,7 @@ Core commands:
 | `papercut render [--repo .]` | Regenerate a markdown projection (`PAPERCUTS.md` when run inside a repo, global view otherwise). Deterministic output. |
 | `papercut install` | Detect installed harnesses; write the reporting instruction into each one's **global** instructions file as an idempotent managed block; wire up available signal adapters. |
 | `papercut uninstall` | Remove all managed blocks and adapters cleanly. |
+| `papercut doctor` | Verify store permissions, managed blocks intact, adapter/hook wiring live, agent detection working. Deterministic remediation hints. |
 | `papercut sweep` | Parse harness session logs since last sweep; extract failure signals into the store. |
 | `papercut triage-pack` | Emit a self-contained markdown bundle (open events, signal clusters, recurrence counts) for any agent to triage. |
 
@@ -191,7 +214,8 @@ validation/pin, share promoted, share dismissed.
 ## Build phases
 
 TDD throughout: red → green → refactor per feature. Unit, integration, and e2e tests
-for every phase.
+for every phase. Once Phase 1 ships, run agentprobe against the CLI as a recurring
+e2e check — a friction-reporting tool must score well on agent-friction benchmarks.
 
 ### Phase 1 — the binary (cross-agent on day one)
 - `add`, `render`, `list`, `install`, `uninstall`; store layout; event schema v1;
@@ -201,11 +225,14 @@ for every phase.
   deterministic `render`; `install`/`uninstall` idempotence incl. pre-existing user
   content around blocks; e2e: fresh fake HOME → install → add → render.
 
-### Phase 2 — first live adapter (Claude Code)
-- PostToolUse hook script + `install` wiring into global settings.
+### Phase 2 — first live adapter (Claude Code) + doctor
+- PostToolUse hook script + `install` wiring into global settings; `doctor` to
+  verify the wiring it creates.
 - Tests: non-zero exit produces exactly one signal line; zero exit produces nothing;
   hook killed mid-write corrupts nothing and the parent task never notices; garbage
-  input swallowed; truncation enforced.
+  input swallowed; truncation enforced; `doctor` detects each broken-wiring state
+  (missing block, stale block version, dead hook, unwritable store) and its hints
+  are deterministic.
 
 ### Phase 3 — sweep (proves the adapter pattern generalizes)
 - Session-log parser for one hookless harness (Codex first); high-water marks;
