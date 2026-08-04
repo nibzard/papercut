@@ -135,8 +135,11 @@ Event schema (v1):
 }
 ```
 
-Rules: events created by `sweep` or transcript mining start as `candidate` (lower trust
-than in-the-moment reports). Every terminal status requires a `resolution.reason`;
+Rules: in-the-moment reports start as `open`. `sweep` and transcript mining write the
+high-volume **Layer 1 signal** schema to `signals/<harness>/` (one-file-per-event would
+balloon `events/`, which is reserved for reports); a signal cluster is promoted into a
+`candidate` event (`source: "sweep"`, lower trust than an in-the-moment report) at triage
+time, never in the capture path. Every terminal status requires a `resolution.reason`;
 `fixed` requires a `ref`. No env-var values, transcripts, source files, or secrets in
 events — SHA, relative cwd, task id, agent, timestamp suffice.
 
@@ -236,7 +239,8 @@ e2e check — a friction-reporting tool must score well on agent-friction benchm
 
 ### Phase 3 — sweep (proves the adapter pattern generalizes)
 - Session-log parser for one hookless harness (Codex first); high-water marks;
-  swept events enter as `candidate`.
+  swept failures enter the store as **Layer 1 signals** (a `candidate` event is a
+  triage-time promotion of a signal cluster, not a sweep-time write — see event rules).
 - Tests: incremental sweep (no duplicates across runs); unknown/changed log format
   degrades to no-op with a warning; fixture transcripts → expected signals.
 

@@ -11,3 +11,6 @@
 
 # Local scratch — never commit real papercut stores or test HOME dirs
 /tmp/
+
+# Local agent/session state (ralph-loop, per-run tooling) — never shared
+.claude/

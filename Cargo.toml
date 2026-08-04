@@ -1,0 +1,26 @@
+[package]
+name = "papercut"
+version = "0.1.0"
+edition = "2021"
+authors = ["Nik-Nak Attack"]
+description = "System-level friction telemetry for coding agents"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nibzard/papercut"
+
+[[bin]]
+name = "papercut"
+path = "src/main.rs"
+
+[lib]
+name = "papercut"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ulid = "1"
+anyhow = "1"
+
+# Dev-only: no extra crates. Tests build temp stores under std::env::temp_dir()
+# using ULIDs for uniqueness, so we don't pull in tempfile.

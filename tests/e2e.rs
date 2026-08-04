@@ -1,0 +1,167 @@
+//! End-to-end CLI tests via the built binary, against an isolated fake HOME.
+
+mod common;
+
+use common::IsolatedEnv;
+use std::process::{Command, Stdio};
+
+fn run(args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(common::bin())
+        .args(args)
+        .output()
+        .expect("run papercut");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+fn run_in(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(common::bin())
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("run papercut");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+#[test]
+fn fresh_home_install_add_render() {
+    let env = IsolatedEnv::new().with_claude();
+
+    // install wires the managed block + hook.
+    let (c, _, _) = run(&["install"]);
+    assert_eq!(c, 0);
+    let claude_md = std::fs::read_to_string(env.home.join(".claude/CLAUDE.md")).unwrap();
+    assert!(claude_md.contains("papercut:begin v1"));
+
+    // add records an event and prints the id in text mode.
+    let (c, out, err) = run(&["add", "shell ate my glob"]);
+    assert_eq!(c, 0, "stderr: {err}");
+    let id = out.trim();
+    assert!(papercut::id::looks_like_id(id));
+
+    // json mode carries the id in the envelope.
+    let (c, out, _) = run(&["--output", "json", "add", "second report"]);
+    assert_eq!(c, 0);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["status"], "ok");
+    assert!(v["data"]["id"].as_str().unwrap().starts_with("pc_"));
+
+    // list shows both.
+    let (c, out, _) = run(&["list"]);
+    assert_eq!(c, 0);
+    assert_eq!(out.lines().count(), 2);
+
+    // render is deterministic markdown.
+    let (c, out, _) = run(&["render"]);
+    assert_eq!(c, 0);
+    assert!(out.contains("# Papercuts"));
+    assert!(out.contains("## open (2)"));
+}
+
+#[test]
+fn add_multiline_and_quoted_message() {
+    let _env = IsolatedEnv::new();
+    let msg = "line one\nline two with -d flag and 'quotes'";
+    let (c, out, _) = run(&["add", "--", msg]);
+    assert_eq!(c, 0);
+    let id = out.trim();
+    let (events, _skip) = papercut::store::read_all_events();
+    let ev = events.iter().find(|e| e.id == id).unwrap();
+    assert_eq!(ev.summary, msg);
+}
+
+#[test]
+fn add_in_non_repo_dir_still_records() {
+    let _env = IsolatedEnv::new();
+    let tmp = std::env::temp_dir().join(format!("pc-nongit-{}", papercut::id::new_id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let (c, out, _) = run_in(&tmp, &["add", "no git here"]);
+    assert_eq!(c, 0);
+    let id = out.trim();
+    let (events, _) = papercut::store::read_all_events();
+    let ev = events.iter().find(|e| e.id == id).unwrap();
+    assert!(
+        ev.context.repo.is_none(),
+        "no repo metadata outside a git repo"
+    );
+}
+
+#[test]
+fn empty_message_is_real_failure_exit_1() {
+    let _env = IsolatedEnv::new();
+    let (c, _out, _err) = run(&["add", "   "]);
+    assert_eq!(c, 1, "empty message must be exit 1, not recorded");
+}
+
+#[test]
+fn usage_error_is_exit_2() {
+    let _env = IsolatedEnv::new();
+    // No required message argument.
+    let (c, _out, _err) = run(&["add"]);
+    assert_eq!(c, 2, "usage error must be exit 2");
+}
+
+#[test]
+fn json_envelope_shape_on_error() {
+    let _env = IsolatedEnv::new();
+    let (c, out, _) = run(&["--output", "json", "add", ""]);
+    assert_eq!(c, 1);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["status"], "error");
+    assert!(v["errors"].is_array());
+    let err = &v["errors"][0];
+    assert!(err["code"].is_string());
+    assert!(err["retryable"].is_boolean());
+    assert!(err["hint"].is_string());
+}
+
+#[test]
+fn hook_is_silent_and_exits_zero_regardless_of_input() {
+    let _env = IsolatedEnv::new();
+    let payload = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": {"command": "false"},
+        "tool_result": {"exit_code": 1, "output": "nope"},
+        "session_id": "abc",
+    });
+    let mut cmd = Command::new(common::bin());
+    cmd.args(["_hook", "claude-code"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty(), "hook must not print to stdout");
+
+    // garbage stdin → still silent and 0
+    let mut cmd = Command::new(common::bin());
+    cmd.args(["_hook", "claude-code"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"not json at all {{{")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty());
+}
