@@ -185,8 +185,8 @@ Never touch content outside the markers.
 | Harness | Mechanism | Tier |
 | --- | --- | --- |
 | Claude Code | `PostToolUse` hook on Bash: on non-zero exit, append one signal line. Installed into global settings by `papercut install`. | live |
-| OpenCode | Plugin/hook equivalent (verify current API during implementation). | live |
 | Codex | No hook → `papercut sweep` parses on-disk session logs (JSONL under `~/.codex/`; verify format). | sweep |
+| OpenCode | Managed block + Layer-2 reports. No verified silent global hook API as of 2026-08-04 — promote to `live` only after verifying a hook/plugin equivalent against an installed OpenCode (never from memory or docs). | none |
 | Anything else | Reports-only (Layer 2 still works). Add adapters on demand. | none |
 
 Adapter invariants: normalize to the one signal schema; swallow every error (a broken
