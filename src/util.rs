@@ -7,6 +7,14 @@ pub const CMD_MAX: usize = 200;
 pub const STDERR_MAX_LINES: usize = 5;
 /// Hard character cap on the stderr head, even across the kept lines.
 pub const STDERR_MAX_CHARS: usize = 800;
+/// Maximum characters kept from any other single string field (repo, cwd,
+/// session, agent). Keeps a runaway path or id from bloating the store.
+pub const FIELD_MAX: usize = 512;
+/// Maximum bytes read from a hook's stdin. Real payloads are tiny; anything
+/// larger is truncated (which then fails to parse → the hook records nothing
+/// and exits 0). Bounds memory so a runaway stdin can never OOM the hook into
+/// a non-zero exit — the hook path must always be silent and infallible.
+pub const STDIN_MAX: usize = 1024 * 1024;
 
 /// Truncate `s` to at most `max` characters on a UTF-8 boundary, appending an
 /// ellipsis when truncation occurs. Never panics on non-UTF-8 boundaries.

@@ -171,3 +171,22 @@ fn partial_signal_line_is_skipped_not_fatal() {
     assert_eq!(sigs.len(), 1, "valid signal still reads");
     assert_eq!(skipped, 1, "torn line is skipped, not fatal");
 }
+
+/// A large-but-valid payload (well under the stdin cap) still records exactly
+/// one signal — guards the stdin cap against being too small for real payloads
+/// with sizable command output.
+#[test]
+fn large_valid_payload_still_records() {
+    let _env = IsolatedEnv::new();
+    let big_output = "noise line\n".repeat(4000); // ~45 KB, under the 1 MiB cap
+    hook(&json!({
+        "tool_name": "Bash",
+        "tool_input": {"command": "make build"},
+        "tool_result": {"exit_code": 1, "output": big_output},
+        "session_id": "sess-big",
+    }));
+    let sigs = session_signals("sess-big");
+    assert_eq!(sigs.len(), 1);
+    assert_eq!(sigs[0]["cmd"], "make build");
+    assert_eq!(sigs[0]["exit"], 1);
+}

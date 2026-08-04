@@ -7,7 +7,7 @@
 
 use crate::paths::data_root;
 use crate::util::{
-    cap_chars, first_n_lines, truncate, CMD_MAX, STDERR_MAX_CHARS, STDERR_MAX_LINES,
+    cap_chars, first_n_lines, truncate, CMD_MAX, FIELD_MAX, STDERR_MAX_CHARS, STDERR_MAX_LINES,
 };
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -33,7 +33,8 @@ pub struct Signal {
 }
 
 impl Signal {
-    /// Construct a signal, truncating command and stderr head aggressively.
+    /// Construct a signal, truncating every field aggressively so no runaway
+    /// command, path, or stderr burst can bloat the store.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ts: impl Into<String>,
@@ -45,19 +46,20 @@ impl Signal {
         stderr: Option<&str>,
         session: Option<String>,
     ) -> Self {
+        let bound = |o: Option<String>| o.map(|s| cap_chars(&s, FIELD_MAX));
         let stderr_head = stderr.map(|s| {
             let lines = first_n_lines(s, STDERR_MAX_LINES);
             cap_chars(&lines, STDERR_MAX_CHARS)
         });
         Self {
             ts: ts.into(),
-            repo,
-            cwd,
-            agent,
+            repo: bound(repo),
+            cwd: bound(cwd),
+            agent: bound(agent),
             cmd: truncate(cmd, CMD_MAX),
             exit,
             stderr_head,
-            session,
+            session: bound(session),
         }
     }
 }
@@ -150,5 +152,26 @@ mod tests {
         let s = Signal::new("t", None, None, None, "cmd", 2, None, None);
         let j = serde_json::to_string(&s).unwrap();
         assert!(!j.contains("stderr_head"));
+    }
+
+    #[test]
+    fn long_string_fields_are_bounded() {
+        let big = "p".repeat(5000);
+        let s = Signal::new(
+            "t",
+            Some(big.clone()),
+            Some(big.clone()),
+            Some(big.clone()),
+            "cmd",
+            2,
+            None,
+            Some(big.clone()),
+        );
+        // +1 for the truncation ellipsis.
+        assert!(s.cwd.as_ref().unwrap().chars().count() <= FIELD_MAX + 1);
+        assert!(s.session.as_ref().unwrap().chars().count() <= FIELD_MAX + 1);
+        assert!(s.agent.as_ref().unwrap().chars().count() <= FIELD_MAX + 1);
+        assert!(s.repo.as_ref().unwrap().chars().count() <= FIELD_MAX + 1);
+        assert!(s.cwd.unwrap().ends_with('…'));
     }
 }

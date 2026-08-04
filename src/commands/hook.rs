@@ -7,6 +7,7 @@
 use crate::cli::HookArgs;
 use crate::signal::{append_signal, Signal};
 use crate::time::now_rfc3339;
+use crate::util::STDIN_MAX;
 use serde_json::Value;
 use std::io::Read;
 
@@ -15,8 +16,13 @@ pub fn run(args: HookArgs) {
 }
 
 fn capture(harness: &str) -> anyhow::Result<()> {
+    // Bound the read: a runaway stdin must never OOM the hook into a non-zero
+    // exit. Anything beyond the cap is dropped, the truncated payload then fails
+    // to parse below, and we record nothing — silent and infallible, as required.
     let mut buf = String::new();
-    std::io::stdin().read_to_string(&mut buf)?;
+    std::io::stdin()
+        .take(STDIN_MAX as u64)
+        .read_to_string(&mut buf)?;
 
     // Garbage on stdin must never crash the parent task.
     let payload: Value = serde_json::from_str(&buf).unwrap_or(Value::Null);
