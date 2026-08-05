@@ -47,10 +47,33 @@ pub fn write_event(event: &Event) -> anyhow::Result<PathBuf> {
 }
 
 /// One malformed/unreadable event file encountered while scanning.
-#[derive(Debug, Clone)]
+///
+/// `repo` is the file's repo attribution when it is knowable: a file that
+/// parsed but was then quarantined (unknown schema version, or a violated
+/// status/resolution invariant) still carries `context.repo`, so its quarantine
+/// is attributable. A file that failed to parse or to read has no knowable
+/// repo (`None`) — `query::load` therefore excludes unattributable skips from a
+/// repo-scoped view rather than leaking every repo's corrupt files into it.
+#[derive(Debug, Clone, Serialize)]
 pub struct SkippedFile {
     pub file: String,
     pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+}
+
+impl SkippedFile {
+    /// The file name plus, when the repo is knowable, a ` [repo]` suffix — so
+    /// the human-readable listings (`list`/`render`/`triage-pack`) can tell
+    /// attributable quarantines apart under the global view, where several
+    /// repos' corrupt files interleave. Unattributable skips (parse/read
+    /// failures carry `repo: None`) get the bare name.
+    pub fn file_label(&self) -> String {
+        match &self.repo {
+            Some(r) => format!("{} [{}]", self.file, r),
+            None => self.file.clone(),
+        }
+    }
 }
 
 /// Read every event file, sorted by id (≈ chronological). Malformed files are
@@ -92,19 +115,51 @@ fn read_events_in(dir: PathBuf) -> (Vec<Event>, Vec<SkippedFile>) {
                 skipped.push(SkippedFile {
                     file: name,
                     reason: format!("read error: {e}"),
+                    repo: None,
                 });
                 continue;
             }
         };
         match serde_json::from_str::<Event>(&text) {
-            Ok(ev) => events.push(ev),
+            Ok(ev) => {
+                // A file may parse yet still be unsafe to act on: an unknown
+                // schema version (forward-incompatible) or a violated status/
+                // resolution invariant. Validate on load and quarantine such
+                // events into `skipped` rather than feeding them to triage or
+                // render as if they were sound.
+                if ev.schema_version != SCHEMA_VERSION {
+                    skipped.push(SkippedFile {
+                        file: name,
+                        reason: format!(
+                            "schema version {} not supported (this build reads {})",
+                            ev.schema_version, SCHEMA_VERSION
+                        ),
+                        repo: ev.context.repo.clone(),
+                    });
+                    continue;
+                }
+                if let Err(reason) = ev.validate() {
+                    skipped.push(SkippedFile {
+                        file: name,
+                        reason,
+                        repo: ev.context.repo.clone(),
+                    });
+                    continue;
+                }
+                events.push(ev);
+            }
             Err(e) => skipped.push(SkippedFile {
                 file: name,
                 reason: format!("parse error: {e}"),
+                repo: None,
             }),
         }
     }
     events.sort_by(|a, b| a.id.cmp(&b.id));
+    // Deterministic skip order (by file name) so `list`/`render`/`triage-pack`
+    // surface the same reasons in the same order for a given store — required
+    // for render's byte-identical-output guarantee.
+    skipped.sort_by(|a, b| a.file.cmp(&b.file));
     (events, skipped)
 }
 
@@ -191,6 +246,41 @@ pub struct SweepMark {
     /// Byte offset within `last_path` where the next sweep should resume.
     #[serde(default)]
     pub last_offset: u64,
+    /// `function_call`s seen in `last_path` whose `function_call_output` has not
+    /// arrived yet, persisted so a call/output pair split across two sweeps is
+    /// not silently lost — as long as `last_path` has not advanced to a newer
+    /// swept file (see `codex::sweep`'s known limitation: once the watermark
+    /// advances past this file the pending calls are dropped and the file is
+    /// never revisited, so even a same-file pair can be lost once a newer file
+    /// is swept).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pending_calls: BTreeMap<String, PendingCall>,
+    /// The last `session_meta` context seen in `last_path`, so a resumed file
+    /// still knows its session id / cwd / repo even though `session_meta` lives
+    /// above the resume offset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_session: Option<SessionCtx>,
+}
+
+/// A `function_call` awaiting its `function_call_output`, persisted in the
+/// sweep watermark so the pair survives a sweep-boundary split.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PendingCall {
+    pub cmd: String,
+    pub ts: String,
+}
+
+/// Session-level context extracted from `session_meta`, cached in the watermark
+/// so a partially-read file can still emit well-formed signals on resume.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionCtx {
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub git_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub repo: Option<String>,
 }
 
 pub fn sweeps_path() -> Option<PathBuf> {
@@ -290,6 +380,44 @@ mod tests {
             let (got, skipped) = read_all_events();
             assert_eq!(got.len(), 1, "valid event still reads");
             assert_eq!(skipped.len(), 1, "garbage skipped");
+        });
+    }
+
+    #[test]
+    fn invariant_violation_is_skipped_on_load() {
+        with_store(|| {
+            ensure_store().unwrap();
+            // A terminal status with no resolution violates the model invariant.
+            let mut bad = mk("pc_01K0000000000000000000003");
+            bad.status = Status::Fixed;
+            bad.resolution = None;
+            std::fs::write(
+                events_dir().unwrap().join(format!("{}.json", bad.id)),
+                serde_json::to_string(&bad).unwrap(),
+            )
+            .unwrap();
+            let (got, skipped) = read_all_events();
+            assert!(got.is_empty(), "invalid event is quarantined");
+            assert_eq!(skipped.len(), 1);
+            assert!(skipped[0].reason.contains("fixed"));
+        });
+    }
+
+    #[test]
+    fn unknown_schema_version_is_skipped_on_load() {
+        with_store(|| {
+            ensure_store().unwrap();
+            let mut fut = mk("pc_01K0000000000000000000004");
+            fut.schema_version = SCHEMA_VERSION + 1;
+            std::fs::write(
+                events_dir().unwrap().join(format!("{}.json", fut.id)),
+                serde_json::to_string(&fut).unwrap(),
+            )
+            .unwrap();
+            let (got, skipped) = read_all_events();
+            assert!(got.is_empty(), "forward-incompatible event quarantined");
+            assert_eq!(skipped.len(), 1);
+            assert!(skipped[0].reason.contains("schema version"));
         });
     }
 

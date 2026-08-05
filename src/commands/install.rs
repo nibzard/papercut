@@ -15,7 +15,7 @@ pub fn run(args: InstallArgs) -> RunResult {
     let selected = filter_harnesses(detected, args.harness.as_deref());
 
     if selected.is_empty() {
-        return RunResult::Err(ErrorItem::new(
+        return RunResult::err(ErrorItem::new(
             "no_harnesses",
             "no harnesses detected to install into",
             false,
@@ -40,7 +40,22 @@ pub fn run(args: InstallArgs) -> RunResult {
         });
 
         // 1. Managed block upsert.
-        let content = std::fs::read_to_string(&h.instructions_file).unwrap_or_default();
+        // Only a missing file is treated as empty (create fresh). Any other read
+        // failure (invalid UTF-8, permission denied, transient I/O) must surface
+        // as an error: feeding "" to upsert and overwriting would destroy the
+        // user's real content outside our managed markers.
+        let content = match std::fs::read_to_string(&h.instructions_file) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                errs.push(format!(
+                    "{}: read {}: {e}",
+                    h.id,
+                    h.instructions_file.display()
+                ));
+                continue;
+            }
+        };
         let (new_content, action) = managed_block::upsert(&content);
         let parent = h
             .instructions_file
@@ -84,26 +99,34 @@ pub fn run(args: InstallArgs) -> RunResult {
     }
 
     cfg.schema_version = crate::model::SCHEMA_VERSION;
-    let _ = store::write_config(&cfg);
+    if let Err(e) = store::write_config(&cfg) {
+        errs.push(format!("config: {e}"));
+    }
 
+    let text = format_summary(&results);
     if errs.is_empty() {
-        let text = format_summary(&results);
         RunResult::Ok {
             data: json!({ "installed": results }),
             text,
         }
     } else {
-        RunResult::Err(ErrorItem::new(
-            "install_partial",
-            format!(
-                "{} harness(es) configured; {} failed: {}",
-                results.len(),
-                errs.len(),
-                errs.join("; ")
-            ),
-            true,
-            "re-run papercut install; check permissions on the listed paths",
-        ))
+        // One structured error per failure; the partial result (what was
+        // configured) rides in `data` so an agent does not lose successful work.
+        let errors = errs
+            .iter()
+            .map(|m| {
+                ErrorItem::new(
+                    "install_partial",
+                    m.clone(),
+                    true,
+                    "re-run papercut install; check permissions on the listed paths",
+                )
+            })
+            .collect::<Vec<_>>();
+        RunResult::Err {
+            data: json!({ "installed": results }),
+            errors,
+        }
     }
 }
 

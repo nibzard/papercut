@@ -81,13 +81,21 @@ pub fn render_markdown(scope: &RepoScope, events: &[Event]) -> String {
             if let Some(cat) = &e.category {
                 out.push_str(&format!("  - category: {cat}\n"));
             }
-            if let Some(res) = &e.resolution {
-                let mut line = format!("  - resolved: {}", res.reason);
-                if let Some(rf) = &res.ref_ {
-                    line.push_str(&format!(" (`{rf}`)"));
+            // Only terminal events project their resolution. A reopened papercut
+            // (non-terminal) may keep a stale resolution in the model — that's
+            // allowed and load does not quarantine it — but surfacing "resolved:"
+            // under an `## open` section would contradict the status grouping.
+            // Grouping already keys off `status`; this keeps the per-event line
+            // consistent with it.
+            if e.status.is_terminal() {
+                if let Some(res) = &e.resolution {
+                    let mut line = format!("  - resolved: {}", truncate(&res.reason, SUMM_MAX));
+                    if let Some(rf) = &res.ref_ {
+                        line.push_str(&format!(" (`{rf}`)"));
+                    }
+                    out.push_str(&line);
+                    out.push('\n');
                 }
-                out.push_str(&line);
-                out.push('\n');
             }
         }
         out.push('\n');
@@ -154,5 +162,30 @@ mod tests {
         });
         let md = render_markdown(&RepoScope::All, std::slice::from_ref(&e));
         assert!(md.contains("resolved: pinned dep (`abc1234`)"));
+    }
+
+    /// A reopened papercut (status flipped back to `open`) is allowed to keep its
+    /// stale resolution in the model, but render must NOT show a `resolved:` line
+    /// for it — that would contradict the `## open` grouping. Only terminal
+    /// statuses project their resolution.
+    #[test]
+    fn reopened_event_suppresses_resolution_line() {
+        let mut e = ev("pc_01K000000000000000000000E", Status::Open, "recurred");
+        // A ref distinct from the helper's `git_sha` so we can tell a leaked ref
+        // apart from the legitimately-rendered sha line.
+        e.resolution = Some(Resolution {
+            reason: "previously fixed".into(),
+            ref_: Some("deadbeef".into()),
+        });
+        let md = render_markdown(&RepoScope::All, std::slice::from_ref(&e));
+        assert!(md.contains("## open"), "still grouped under open: {md}");
+        assert!(
+            !md.contains("resolved:"),
+            "stale resolution must not project for a non-terminal event: {md}"
+        );
+        assert!(
+            !md.contains("deadbeef"),
+            "stale ref must not leak into a non-terminal projection: {md}"
+        );
     }
 }

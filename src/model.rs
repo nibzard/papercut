@@ -133,35 +133,44 @@ pub const SCHEMA_VERSION: u32 = 1;
 
 impl Event {
     /// Validate status/resolution invariants. Every terminal status requires a
-    /// `resolution.reason`; `fixed` additionally requires a `resolution.ref`.
+    /// non-empty `resolution.reason`; `fixed` additionally requires a non-empty
+    /// `resolution.ref`. Non-terminal events are allowed to carry a resolution.
     pub fn validate(&self) -> Result<(), String> {
-        if self.status.is_terminal() {
-            match &self.resolution {
-                None => Err(format!(
+        if !self.status.is_terminal() {
+            // PLAN documents only the forward rule (terminal ⇒ resolution). The
+            // documented reopen workflow — "status changes are edits to one JSON
+            // field" — leaves the prior resolution in place when a fixed papercut
+            // is flipped back to `open`. Rejecting that here would quarantine a
+            // previously-valid event out of `list` and the triage pack with no
+            // command able to surface or repair it. So the stale resolution is
+            // allowed to ride along; `render`/`list` project off `status`, not
+            // `resolution`.
+            return Ok(());
+        }
+        let r = match &self.resolution {
+            None => {
+                return Err(format!(
                     "status `{}` is terminal but has no resolution.reason",
                     self.status.label()
-                )),
-                Some(r) if r.reason.trim().is_empty() => Err(format!(
-                    "status `{}` is terminal but resolution.reason is empty",
-                    self.status.label()
-                )),
-                Some(_)
-                    if self.status == Status::Fixed
-                        && self.resolution.as_ref().unwrap().ref_.is_none() =>
-                {
-                    Err("status `fixed` requires a resolution.ref".into())
-                }
-                _ => Ok(()),
+                ))
             }
-        } else if self.resolution.is_some() {
-            // Non-terminal events should not carry a resolution.
-            Err(format!(
-                "status `{}` is not terminal but carries a resolution",
+            Some(r) => r,
+        };
+        if r.reason.trim().is_empty() {
+            return Err(format!(
+                "status `{}` is terminal but resolution.reason is empty",
                 self.status.label()
-            ))
-        } else {
-            Ok(())
+            ));
         }
+        // `fixed` requires a ref that is present AND non-blank. An absent ref and
+        // a wiped-to-`""` ref are the same defect: `serde` deserializes `"ref":""`
+        // as `Some("")` (not `None`), so an `is_none()` check alone is bypassed.
+        if self.status == Status::Fixed
+            && r.ref_.as_ref().is_none_or(|rf| rf.trim().is_empty())
+        {
+            return Err("status `fixed` requires a non-empty resolution.ref".into());
+        }
+        Ok(())
     }
 }
 
@@ -220,16 +229,39 @@ mod tests {
         assert!(e.validate().is_ok());
     }
 
+    /// `serde` turns `"ref":""` into `Some("")`, not `None`. A blank ref must
+    /// fail the "fixed requires a ref" rule just like an absent one — otherwise
+    /// a wiped field defeats the invariant.
     #[test]
-    fn non_terminal_with_resolution_is_invalid() {
+    fn fixed_with_blank_ref_is_invalid() {
+        for blank in ["", "   ", "\t"] {
+            let e = base_event(
+                Status::Fixed,
+                Some(Resolution {
+                    reason: "done".into(),
+                    ref_: Some(blank.into()),
+                }),
+            );
+            assert!(
+                e.validate().is_err(),
+                "blank ref {blank:?} must fail validation"
+            );
+        }
+    }
+
+    /// Reopening a fixed papercut (editing `status` back to `open`) is the
+    /// documented one-field-edit workflow and leaves the prior resolution in
+    /// place. Such an event must NOT be quarantined.
+    #[test]
+    fn non_terminal_with_resolution_is_valid() {
         let e = base_event(
             Status::Open,
             Some(Resolution {
-                reason: "x".into(),
-                ref_: None,
+                reason: "previously fixed".into(),
+                ref_: Some("abc1234".into()),
             }),
         );
-        assert!(e.validate().is_err());
+        assert!(e.validate().is_ok());
     }
 
     #[test]

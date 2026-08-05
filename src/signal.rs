@@ -64,31 +64,66 @@ impl Signal {
     }
 }
 
+/// A path segment is safe to join into the store tree only if it is non-empty
+/// and contains no path separators or traversal components. This guards
+/// `<harness>` and `<session>` so a hostile or malformed value can never escape
+/// the `signals/` directory (`../../etc/...`) or scribble outside the store.
+pub fn safe_segment(s: &str) -> bool {
+    !s.is_empty() && !s.contains('/') && !s.contains('\\') && s != "." && s != ".."
+}
+
 /// `~/.local/share/papercuts/signals/<harness>/`, or `None` if no home data dir
-/// is resolvable (the hook path then silently no-ops).
+/// is resolvable **or** the harness segment is unsafe. Returning `None` makes
+/// the hook path silently no-op rather than write outside the store.
 pub fn signals_dir(harness: &str) -> Option<PathBuf> {
+    if !safe_segment(harness) {
+        return None;
+    }
     data_root().map(|r| r.join("signals").join(harness))
 }
 
-/// Path to a session's signal file.
+/// Path to a session's signal file, or `None` if either segment is unsafe or no
+/// home data dir is resolvable.
 pub fn session_file(harness: &str, session: &str) -> Option<PathBuf> {
+    if !safe_segment(session) {
+        return None;
+    }
     signals_dir(harness).map(|d| d.join(format!("{session}.jsonl")))
 }
 
 /// Append one signal line to `<harness>/<session>.jsonl`. Creates dirs.
+///
+/// The whole serialized line is written in a single `write_all` (which loops on
+/// short writes) under `O_APPEND`, so concurrent appenders never overwrite each
+/// other's line. `sync_all` is best-effort: a successful `write_all` means the
+/// line is already in the kernel page cache and visible to the next reader, so
+/// we treat it as recorded and ignore an `fsync` error. Returning `Ok` here (not
+/// `Err`) on a sync failure is deliberate — the sweep pins its watermark to the
+/// failing line on `Err` and would re-append the same output next run,
+/// manufacturing an accidental duplicate. Only a `write_all` failure (the line
+/// genuinely did not land) returns `Err` so the caller can retry.
+///
+/// Every caller (hook adapter, sweep) discards the error anyway — a broken
+/// signal sink must never surface in the parent task.
 pub fn append_signal(harness: &str, session: &str, signal: &Signal) -> anyhow::Result<()> {
     let dir = signals_dir(harness).context("no home data dir: set $HOME or $XDG_DATA_HOME")?;
     std::fs::create_dir_all(&dir).context("create signals dir")?;
-    let path = session_file(harness, session).context("no home data dir")?;
+    let path = session_file(harness, session).context("unsafe or unresolvable signal path")?;
+    let mut line = serde_json::to_string(signal).context("serialize signal")?;
+    line.push('\n');
+    // O_APPEND: the kernel advances the offset and writes atomically, so two
+    // concurrent appenders never overwrite each other's line. write_all loops
+    // on short writes so the whole line lands in one logical write.
     let mut f = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
         .with_context(|| format!("open signal file {}", path.display()))?;
-    let mut line = serde_json::to_string(signal).context("serialize signal")?;
-    line.push('\n');
     f.write_all(line.as_bytes())
         .with_context(|| format!("write signal file {}", path.display()))?;
+    // Best-effort durability: the bytes are already visible to readers, so a
+    // sync failure is not a write failure (see the doc comment above).
+    let _ = f.sync_all();
     Ok(())
 }
 
@@ -173,5 +208,32 @@ mod tests {
         assert!(s.agent.as_ref().unwrap().chars().count() <= FIELD_MAX + 1);
         assert!(s.repo.as_ref().unwrap().chars().count() <= FIELD_MAX + 1);
         assert!(s.cwd.unwrap().ends_with('…'));
+    }
+
+    #[test]
+    fn safe_segment_rejects_traversal() {
+        assert!(safe_segment("claude-code"));
+        assert!(safe_segment("01HZXSESSION"));
+        // Rejects empties, traversal, and anything with a separator.
+        assert!(!safe_segment(""));
+        assert!(!safe_segment("."));
+        assert!(!safe_segment(".."));
+        assert!(!safe_segment("../.."));
+        assert!(!safe_segment("a/b"));
+        assert!(!safe_segment("a\\b"));
+        assert!(!safe_segment("/etc/passwd"));
+    }
+
+    #[test]
+    fn unsafe_segments_yield_no_path() {
+        // A traversal harness must not resolve to a directory at all.
+        assert!(signals_dir("../../etc").is_none());
+        assert!(session_file("../etc", "sess").is_none());
+        assert!(session_file("ok", "../../etc").is_none());
+        // And therefore append degrades to an error the caller discards,
+        // never a write outside the store.
+        let s = Signal::new("t", None, None, None, "cmd", 1, None, None);
+        assert!(append_signal("../../etc", "sess", &s).is_err());
+        assert!(append_signal("ok", "../pwn", &s).is_err());
     }
 }

@@ -81,6 +81,68 @@ fn incremental_sweep_does_not_duplicate_then_picks_up_new() {
     assert_eq!(sigs.len(), 2);
 }
 
+/// A `function_call` and its `function_call_output` that arrive in SEPARATE
+/// sweeps — the call seen first, the output appended later — must still be
+/// matched and emit a signal. The call is persisted in `sweeps.json`'s
+/// `pending_calls` as long as `last_path` has not advanced to a newer swept
+/// file, so an output appended on the next run still finds its call. This
+/// guards the F1 cross-run fix; without it a split pair is silently lost.
+#[test]
+fn call_output_split_across_runs_is_not_lost() {
+    let env = IsolatedEnv::new().with_codex();
+    let f = env
+        .home
+        .join(".codex/sessions/2026/08/04/rollout-split.jsonl");
+
+    // First sweep: only META + CALL are present; the output has not arrived yet.
+    write_rollout(&f, &format!("{META}\n{CALL}\n"));
+    let o1 = codex::sweep();
+    assert_eq!(o1.signals_emitted, 0, "no output yet → no signal");
+    let (sigs, _) = papercut::signal::read_signals("codex");
+    assert!(sigs.is_empty());
+
+    // The output is appended later; last_path still names this file, so the
+    // pending call c1 survives in the watermark and is matched on resume.
+    let mut fh = std::fs::OpenOptions::new().append(true).open(&f).unwrap();
+    fh.write_all(format!("{OUT_FAIL}\n").as_bytes()).unwrap();
+    drop(fh);
+
+    let o2 = codex::sweep();
+    assert_eq!(o2.signals_emitted, 1, "split pair matched across runs, not lost");
+    let (sigs, _) = papercut::signal::read_signals("codex");
+    assert_eq!(sigs.len(), 1);
+    assert_eq!(sigs[0].cmd, "make build");
+    assert_eq!(sigs[0].exit, 2);
+}
+
+/// After a split pair is matched, a further sweep with no new content must not
+/// re-emit the signal: the watermark advanced past the output line, so it is
+/// never re-read. Guards the F3 idempotence property (no duplication).
+#[test]
+fn resweep_after_split_does_not_duplicate() {
+    let env = IsolatedEnv::new().with_codex();
+    let f = env
+        .home
+        .join(".codex/sessions/2026/08/04/rollout-split2.jsonl");
+
+    // Sweep 1: call only (output not yet present).
+    write_rollout(&f, &format!("{META}\n{CALL}\n"));
+    codex::sweep();
+
+    // Append the output; sweep 2 matches the split pair and emits once.
+    let mut fh = std::fs::OpenOptions::new().append(true).open(&f).unwrap();
+    fh.write_all(format!("{OUT_FAIL}\n").as_bytes()).unwrap();
+    drop(fh);
+    let o2 = codex::sweep();
+    assert_eq!(o2.signals_emitted, 1);
+
+    // Sweep 3: nothing new — must not duplicate.
+    let o3 = codex::sweep();
+    assert_eq!(o3.signals_emitted, 0, "no duplicate on re-sweep");
+    let (sigs, _) = papercut::signal::read_signals("codex");
+    assert_eq!(sigs.len(), 1, "still exactly one signal");
+}
+
 #[test]
 fn unknown_format_is_noop_with_warning() {
     let env = IsolatedEnv::new().with_codex();

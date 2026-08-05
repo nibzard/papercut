@@ -11,23 +11,39 @@ use std::env;
 use std::path::PathBuf;
 
 /// The user's home directory from `$HOME`.
+///
+/// A relative or empty `$HOME` is treated as unset: a relative home would
+/// resolve the private store against the cwd and could land it inside a git
+/// repo. Only an absolute home is honored.
 pub fn home_dir() -> Option<PathBuf> {
-    env::var_os("HOME")
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
+    let h = env::var_os("HOME")?;
+    if h.is_empty() {
+        return None;
+    }
+    let p = PathBuf::from(h);
+    if !p.is_absolute() {
+        return None;
+    }
+    Some(p)
 }
 
 /// Root of the central papercut store, or `None` if no home data dir can be
 /// resolved.
 ///
 /// We deliberately do NOT fall back to a cwd-relative path when `$HOME` and
-/// `$XDG_DATA_HOME` are both unset: that could land the private store inside a
-/// git repo and get it committed. Instead, callers handle `None` explicitly —
-/// the CLI surfaces an honest error (exit 1); the live hook path silently
-/// no-ops, since a missing store beats an insecure one.
+/// `$XDG_DATA_HOME` are both unset (or relative): that could land the private
+/// store inside a git repo and get it committed. A relative `$XDG_DATA_HOME`
+/// is likewise ignored for the same reason. Instead, callers handle `None`
+/// explicitly — the CLI surfaces an honest error (exit 1); the live hook path
+/// silently no-ops, since a missing store beats an insecure one.
 pub fn data_root() -> Option<PathBuf> {
-    if let Some(x) = env::var_os("XDG_DATA_HOME").filter(|s| !s.is_empty()) {
-        return Some(PathBuf::from(x).join("papercuts"));
+    if let Some(x) = env::var_os("XDG_DATA_HOME") {
+        if !x.is_empty() {
+            let p = PathBuf::from(&x);
+            if p.is_absolute() {
+                return Some(p.join("papercuts"));
+            }
+        }
     }
     if let Some(h) = home_dir() {
         return Some(h.join(".local").join("share").join("papercuts"));
@@ -81,6 +97,35 @@ mod tests {
         env::set_var("HOME", "");
         assert!(data_root().is_none());
         // Restore.
+        match old_home {
+            Some(v) => env::set_var("HOME", v),
+            None => env::remove_var("HOME"),
+        }
+        match old_xdg {
+            Some(v) => env::set_var("XDG_DATA_HOME", v),
+            None => env::remove_var("XDG_DATA_HOME"),
+        }
+    }
+
+    /// A relative `XDG_DATA_HOME` must NOT be honored — the private store would
+    /// resolve against the cwd and could land inside a git repo.
+    #[test]
+    fn relative_xdg_is_ignored() {
+        let _g = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let old_home = env::var_os("HOME");
+        let old_xdg = env::var_os("XDG_DATA_HOME");
+        env::set_var("HOME", "/tmp/papercut-abs-home");
+        env::set_var("XDG_DATA_HOME", "relative/data");
+        let root = data_root().expect("falls back to absolute HOME");
+        assert!(
+            root.starts_with("/tmp/papercut-abs-home"),
+            "relative XDG must be ignored, got {}",
+            root.display()
+        );
+        // A relative HOME is treated as unset too.
+        env::set_var("HOME", "relative/home");
+        env::remove_var("XDG_DATA_HOME");
+        assert!(data_root().is_none(), "relative HOME yields no store");
         match old_home {
             Some(v) => env::set_var("HOME", v),
             None => env::remove_var("HOME"),

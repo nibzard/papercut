@@ -62,12 +62,12 @@ pub fn envelope_ok(data: Value) -> Envelope {
     }
 }
 
-pub fn envelope_err(item: ErrorItem) -> Envelope {
+pub fn envelope_err(data: Value, errors: Vec<ErrorItem>) -> Envelope {
     Envelope {
         schema_version: ENVELOPE_SCHEMA_VERSION,
         status: "error",
-        data: Value::Null,
-        errors: vec![item],
+        data,
+        errors,
     }
 }
 

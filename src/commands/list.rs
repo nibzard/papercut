@@ -4,7 +4,7 @@ use crate::app::RunResult;
 use crate::cli::ListArgs;
 use crate::paths::resolve_repo_filter;
 use crate::query::{current_repo, Filters};
-use crate::util::truncate;
+use crate::util::{truncate, SKIPPED_LIST_MAX, SKIPPED_REASON_MAX};
 use serde_json::json;
 
 pub fn run(args: ListArgs) -> RunResult {
@@ -21,18 +21,16 @@ pub fn run(args: ListArgs) -> RunResult {
     let data = json!({
         "events": events,
         "count": events.len(),
-        "skipped_files": skipped.len(),
+        "skipped": skipped,
     });
-    let text = render_text(&events, skipped.len());
+    let text = render_text(&events, &skipped);
     RunResult::Ok { data, text }
 }
 
-fn render_text(events: &[crate::model::Event], skipped: usize) -> String {
+fn render_text(events: &[crate::model::Event], skipped: &[crate::store::SkippedFile]) -> String {
     if events.is_empty() {
         let mut s = String::from("no events");
-        if skipped > 0 {
-            s.push_str(&format!(" ({skipped} unreadable file(s) skipped)"));
-        }
+        append_skipped(&mut s, skipped);
         return s;
     }
     let mut out = String::new();
@@ -46,24 +44,55 @@ fn render_text(events: &[crate::model::Event], skipped: usize) -> String {
             truncate(&e.summary, 72),
         ));
     }
-    if skipped > 0 {
-        out.push_str(&format!("({skipped} unreadable event file(s) skipped)\n"));
-    }
+    append_skipped(&mut out, skipped);
     out.trim_end().to_string()
+}
+
+/// Append a human-readable list of skipped (quarantined) event files with the
+/// reason each was dropped, so a human can see WHICH file vanished and WHY
+/// (schema / invariant / corruption) rather than just an opaque count. The
+/// reason is truncated and the listing is count-capped so a store with many
+/// corrupt files cannot bloat the output.
+fn append_skipped(out: &mut String, skipped: &[crate::store::SkippedFile]) {
+    if skipped.is_empty() {
+        return;
+    }
+    out.push_str(&format!(
+        "({} unreadable event file(s) skipped)\n",
+        skipped.len()
+    ));
+    for s in skipped.iter().take(SKIPPED_LIST_MAX) {
+        out.push_str(&format!(
+            "  - {}: {}\n",
+            s.file_label(),
+            truncate(&s.reason, SKIPPED_REASON_MAX)
+        ));
+    }
+    if skipped.len() > SKIPPED_LIST_MAX {
+        out.push_str(&format!(
+            "  … {} more not shown\n",
+            skipped.len() - SKIPPED_LIST_MAX
+        ));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{EventContext, Source, Status};
+    use crate::store::SkippedFile;
 
     #[test]
     fn empty_listing() {
-        assert_eq!(render_text(&[], 0), "no events");
-        assert_eq!(
-            render_text(&[], 1),
-            "no events (1 unreadable file(s) skipped)"
-        );
+        assert_eq!(render_text(&[], &[]), "no events");
+        let skipped = vec![SkippedFile {
+            file: "pc_01KGARBAGE0000000000000Z.json".into(),
+            reason: "parse error:EOF".into(),
+            repo: None,
+        }];
+        let txt = render_text(&[], &skipped);
+        assert!(txt.contains("1 unreadable event file(s) skipped"));
+        assert!(txt.contains("pc_01KGARBAGE0000000000000Z.json: parse error:EOF"));
     }
 
     #[test]
@@ -84,7 +113,7 @@ mod tests {
             },
             resolution: None,
         };
-        let txt = render_text(std::slice::from_ref(&e), 0);
+        let txt = render_text(std::slice::from_ref(&e), &[]);
         assert!(txt.contains("pc_01K000000000000000000000A"));
         assert!(txt.contains("open"));
         assert!(txt.contains("github.com/foo/bar"));

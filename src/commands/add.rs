@@ -14,7 +14,7 @@ use serde_json::json;
 pub fn run(args: AddArgs) -> RunResult {
     let summary = args.message.trim();
     if summary.is_empty() {
-        return RunResult::Err(ErrorItem::new(
+        return RunResult::err(ErrorItem::new(
             "empty_message",
             "message is empty",
             false,
@@ -23,7 +23,7 @@ pub fn run(args: AddArgs) -> RunResult {
     }
 
     if let Err(e) = ensure_store() {
-        return RunResult::Err(ErrorItem::new(
+        return RunResult::err(ErrorItem::new(
             "store_unwritable",
             format!("cannot create store: {e}"),
             true,
@@ -57,7 +57,7 @@ pub fn run(args: AddArgs) -> RunResult {
     };
 
     if let Err(e) = event.validate() {
-        return RunResult::Err(ErrorItem::new(
+        return RunResult::err(ErrorItem::new(
             "invalid_event",
             e,
             false,
@@ -71,7 +71,7 @@ pub fn run(args: AddArgs) -> RunResult {
             data: json!({ "id": id, "recorded": true }),
             text: id,
         },
-        Err(e) => RunResult::Err(ErrorItem::new(
+        Err(e) => RunResult::err(ErrorItem::new(
             "write_failed",
             format!("report NOT recorded: {e}"),
             true,

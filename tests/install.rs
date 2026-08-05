@@ -25,8 +25,9 @@ fn uninstall(harness: Option<&str>) {
 
 fn doctor_data() -> Value {
     match papercut::commands::doctor::run() {
+        RunResult::Health { data, .. } => data,
         RunResult::Ok { data, .. } => data,
-        RunResult::Err(e) => panic!("doctor returned Err: {e:?}"),
+        RunResult::Err { errors, .. } => panic!("doctor returned Err: {errors:?}"),
     }
 }
 
@@ -98,7 +99,7 @@ fn settings_wiring_preserves_user_keys_and_is_idempotent() {
             .any(|c| c.contains("papercut") && c.contains("_hook")),
         "our hook added"
     );
-    assert!(papercut::adapters::claude_code::hook_wired());
+    assert!(papercut::adapters::claude_code::hook_present());
 
     // Idempotent: exactly one papercut entry across all groups.
     papercut::adapters::claude_code::install_hook("/x/papercut").unwrap();
@@ -132,7 +133,7 @@ fn settings_wiring_preserves_user_keys_and_is_idempotent() {
     assert!(remaining
         .iter()
         .all(|c| !(c.contains("papercut") && c.contains("_hook"))));
-    assert!(!papercut::adapters::claude_code::hook_wired());
+    assert!(!papercut::adapters::claude_code::hook_present());
 }
 
 #[test]
@@ -192,6 +193,52 @@ fn doctor_flags_missing_hook() {
     assert!(check_ok(&data, "block:claude-code"), "block is independent");
 }
 
+/// F4: a hook entry that points at a missing executable is a dead hook — doctor
+/// must not call it healthy just because the command substring is present.
+#[test]
+fn doctor_flags_dead_hook_pointing_at_missing_exe() {
+    let env = IsolatedEnv::new().with_claude();
+    install(true, None);
+    // Tamper: keep our entry but retarget its exe token at a path that does not
+    // exist. The command substring is still ours, so a substring-only check
+    // would wrongly report healthy.
+    let settings = env.home.join(".claude/settings.json");
+    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    for g in v["hooks"]["PostToolUse"].as_array_mut().unwrap() {
+        for h in g["hooks"].as_array_mut().unwrap() {
+            if h["command"]
+                .as_str()
+                .is_some_and(|c| c.contains("_hook claude-code"))
+            {
+                h["command"] = Value::String("/does/not/exist/papercut _hook claude-code".into());
+            }
+        }
+    }
+    std::fs::write(&settings, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+
+    let data = doctor_data();
+    assert_eq!(
+        data["healthy"],
+        false,
+        "dead-hook exe must be unhealthy"
+    );
+    assert!(!check_ok(&data, "adapter:claude-code"));
+    let adapter = data["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "adapter:claude-code")
+        .unwrap();
+    assert!(
+        adapter["detail"]
+            .as_str()
+            .unwrap()
+            .contains("missing or non-executable"),
+        "detail must explain the dead exe: {}",
+        adapter["detail"]
+    );
+}
+
 /// `doctor` must never crash on an unwritable store — it reports the failure.
 #[test]
 fn doctor_flags_unwritable_store() {
@@ -219,7 +266,8 @@ fn harness_filter_restricts_install_and_uninstall() {
     });
     let data = match r {
         RunResult::Ok { data, .. } => data,
-        RunResult::Err(e) => panic!("install failed: {e:?}"),
+        RunResult::Err { errors, .. } => panic!("install failed: {errors:?}"),
+        RunResult::Health { .. } => panic!("install unexpectedly returned Health"),
     };
     let installed: Vec<&str> = data["installed"]
         .as_array()
@@ -248,5 +296,161 @@ fn harness_filter_restricts_install_and_uninstall() {
     assert!(
         !after.contains("papercut"),
         "filtered uninstall removed the block"
+    );
+}
+
+/// An instructions file that EXISTS but is unreadable (invalid UTF-8) must not
+/// be clobbered. Previously install read it as "" (unwrap_or_default), fed that
+/// to upsert, and overwrote the real file with a bare managed block — destroying
+/// the user's content and exiting 0.
+#[test]
+fn install_refuses_to_clobber_unreadable_instructions_file() {
+    let env = IsolatedEnv::new().with_claude();
+    let path = env.home.join(".claude/CLAUDE.md");
+    // Invalid UTF-8 → read_to_string fails with InvalidData, not NotFound.
+    std::fs::write(&path, b"\xff\xfe PRECIOUS NON-UTF8 \xff\xfe").unwrap();
+
+    let r = papercut::commands::install::run(InstallArgs {
+        yes: true,
+        harness: None,
+    });
+    assert!(
+        matches!(r, RunResult::Err { .. }),
+        "unreadable file must surface an error, not exit 0"
+    );
+
+    // The original bytes survive untouched — install never overwrote it.
+    let after = std::fs::read(&path).unwrap();
+    assert!(
+        after.contains(&0xffu8),
+        "original invalid bytes preserved, not destroyed"
+    );
+    assert!(
+        !String::from_utf8_lossy(&after).contains("papercut:begin"),
+        "no managed block written into an unreadable file"
+    );
+}
+
+/// `install_hook` must refuse to overwrite a settings.json it cannot parse,
+/// rather than swallowing the parse error to `{}` and rewriting a hook-only
+/// object over the user's file.
+#[test]
+fn install_hook_refuses_unparseable_settings() {
+    let env = IsolatedEnv::new().with_claude();
+    let settings = env.home.join(".claude/settings.json");
+    let original = "{ not valid json {{{";
+    std::fs::write(&settings, original).unwrap();
+
+    let r = papercut::adapters::claude_code::install_hook("/x/papercut");
+    assert!(r.is_err(), "must refuse to overwrite unparseable settings");
+
+    let after = std::fs::read_to_string(&settings).unwrap();
+    assert_eq!(
+        after, original,
+        "unparseable settings left byte-identical, not overwritten"
+    );
+}
+
+/// A 0-byte (or whitespace-only) settings.json is semantically "no settings",
+/// not corruption — `touch ~/.claude/settings.json` must not block install.
+/// Previously `from_slice(b"")` failed with "EOF while parsing a value", which
+/// the strict write path treated as "refuse to overwrite", stalling the adapter
+/// step. Blank ⇒ `{}` (same as absent).
+#[test]
+fn install_hook_accepts_blank_settings_file() {
+    let env = IsolatedEnv::new().with_claude();
+    let settings = env.home.join(".claude/settings.json");
+
+    for blank in ["", "  \n\t \n"] {
+        std::fs::write(&settings, blank).unwrap();
+        papercut::adapters::claude_code::install_hook("/x/papercut")
+            .unwrap_or_else(|e| panic!("blank settings must not block install: {e}"));
+        let v: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert!(
+            v["hooks"]["PostToolUse"].pointer("/0/hooks/0/command")
+                .is_some(),
+            "our hook wired over a blank settings file: {v}"
+        );
+        assert!(papercut::adapters::claude_code::hook_present());
+    }
+}
+
+/// A UTF-8 BOM-prefixed settings.json (written by some Windows editors) must not
+/// be misread as corrupt. Previously the BOM bytes (`EF BB BF`) failed the
+/// ascii-whitespace blank check AND `serde_json::from_slice` rejected the BOM, so
+/// a BOM-only file stalled install ("refuse to overwrite") and a BOM-prefixed
+/// `{}` was treated as corrupt — diverging from the lenient `read_settings`
+/// path, which silently read it as `{}`. Stripping the BOM first keeps the three
+/// read paths in agreement.
+#[test]
+fn install_hook_accepts_bom_prefixed_settings() {
+    let env = IsolatedEnv::new().with_claude();
+    let settings = env.home.join(".claude/settings.json");
+    const BOM: &[u8] = b"\xef\xbb\xbf";
+
+    // BOM-only ⇒ blank ⇒ installs the hook, not refused as corrupt.
+    std::fs::write(&settings, BOM).unwrap();
+    papercut::adapters::claude_code::install_hook("/x/papercut")
+        .unwrap_or_else(|e| panic!("BOM-only settings must not block install: {e}"));
+    let v: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    assert!(
+        v.pointer("/hooks/PostToolUse/0/hooks/0/command").is_some(),
+        "our hook wired over a BOM-only file: {v}"
+    );
+
+    // BOM-prefixed valid JSON parses (BOM stripped); user keys survive.
+    let mut with_bom = BOM.to_vec();
+    with_bom.extend_from_slice(br#"{"model":"opus"}"#);
+    std::fs::write(&settings, &with_bom).unwrap();
+    papercut::adapters::claude_code::install_hook("/x/papercut")
+        .unwrap_or_else(|e| panic!("BOM-prefixed JSON must parse, not be refused: {e}"));
+    let v2: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    assert_eq!(v2["model"], "opus", "user key preserved past BOM strip");
+    assert!(v2.pointer("/hooks/PostToolUse/0/hooks/0/command").is_some());
+}
+
+/// A user-owned empty PostToolUse group (a placeholder for another matcher) must
+/// survive both install and uninstall — we touch only entries whose command is
+/// ours. Previously the empty-group retain pruned it unconditionally.
+#[test]
+fn empty_user_posttooluse_group_is_preserved() {
+    let env = IsolatedEnv::new().with_claude();
+    let settings = env.home.join(".claude/settings.json");
+    std::fs::write(
+        &settings,
+        r#"{"hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[]}]}}"#,
+    )
+    .unwrap();
+
+    papercut::adapters::claude_code::install_hook("/x/papercut").unwrap();
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    let matchers: Vec<&str> = v["hooks"]["PostToolUse"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["matcher"].as_str().unwrap())
+        .collect();
+    assert!(
+        matchers.contains(&"Edit"),
+        "user's empty Edit group preserved on install: {matchers:?}"
+    );
+
+    // Uninstall removes only our (Bash) group; the empty Edit group stays.
+    papercut::adapters::claude_code::uninstall_hook().unwrap();
+    let v2: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    let matchers2: Vec<&str> = v2["hooks"]["PostToolUse"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["matcher"].as_str().unwrap())
+        .collect();
+    assert!(
+        matchers2.contains(&"Edit"),
+        "user's empty Edit group survives uninstall: {matchers2:?}"
+    );
+    assert!(
+        !matchers2.contains(&"Bash"),
+        "our Bash group (emptied by removing our hook) is dropped"
     );
 }

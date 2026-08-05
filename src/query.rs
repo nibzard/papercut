@@ -8,7 +8,7 @@ use crate::time::{now_unix, parse_rfc3339_unix};
 /// The repo the CLI is currently running inside, if any.
 pub fn current_repo() -> Option<String> {
     let cur = std::env::current_dir().ok()?;
-    crate::git_meta::gather(&cur).repo
+    crate::git_meta::repo_of(&cur)
 }
 
 pub struct Filters {
@@ -63,5 +63,20 @@ pub fn load(f: &Filters) -> (Vec<Event>, Vec<SkippedFile>) {
     });
 
     events.sort_by(|a, b| a.id.cmp(&b.id));
-    (events, skipped)
+
+    // Quarantined files are a store-global concern, but a repo-scoped view must
+    // not surface them indiscriminately: `render --write --repo A` commits the
+    // projection into A's PAPERCUTS.md, and dumping every repo's corrupt files
+    // there misattributes store-internal data into a published tree. Attribute
+    // where the event parsed (SkippedFile.repo); under `One(r)` keep only skips
+    // attributable to `r` and drop the unknowable ones (parse/read errors),
+    // which still appear under the global `All` view.
+    let scoped = match &f.scope {
+        RepoScope::All => skipped,
+        RepoScope::One(r) => skipped
+            .into_iter()
+            .filter(|s| s.repo.as_deref() == Some(r.as_str()))
+            .collect(),
+    };
+    (events, scoped)
 }

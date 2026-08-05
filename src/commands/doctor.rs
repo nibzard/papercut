@@ -1,7 +1,10 @@
 //! `papercut doctor` — verify store, managed blocks, and adapter wiring.
 //!
-//! Doctor is a diagnostic: it always exits 0 (it ran successfully) and reports
-//! health in `data.healthy`. Each finding carries a deterministic remediation hint.
+//! Doctor is a diagnostic that reports health in `data.healthy` and each
+//! finding with a deterministic remediation hint. Its exit code is honest about
+//! the result: 0 when every check passes, 1 when something is wrong — so a
+//! script can gate on it. The checks payload always rides in the JSON envelope
+//! (success-shaped), so an agent never loses the detail behind a non-zero exit.
 
 use crate::app::RunResult;
 use crate::harness::detect;
@@ -52,19 +55,29 @@ pub fn run() -> RunResult {
         });
 
         if h.id == "claude-code" {
-            let wired = crate::adapters::claude_code::hook_wired();
+            let s = crate::adapters::claude_code::hook_status();
+            let ok = s.present && s.exe_ok;
+            let detail = match (s.present, s.exe_ok) {
+                (true, true) => format!(
+                    "PostToolUse Bash hook present (exe: {})",
+                    s.exe.as_deref().unwrap_or("?")
+                ),
+                (true, false) => format!(
+                    "hook points at missing or non-executable: {}",
+                    s.exe.as_deref().unwrap_or("?")
+                ),
+                (false, _) => "hook missing".into(),
+            };
             checks.push(Check {
                 name: "adapter:claude-code".into(),
-                ok: wired,
-                detail: if wired {
-                    "PostToolUse Bash hook present".into()
-                } else {
-                    "hook missing".into()
-                },
-                hint: if wired {
+                ok,
+                detail,
+                hint: if ok {
                     String::new()
-                } else {
+                } else if !s.present {
                     "run: papercut install".into()
+                } else {
+                    "reinstall papercut, or fix the hook command path".into()
                 },
             });
         }
@@ -84,7 +97,9 @@ pub fn run() -> RunResult {
         })).collect::<Vec<Value>>(),
     });
     let text = format_doctor(&checks, healthy);
-    RunResult::Ok { data, text }
+    // Health routes the full checks payload through the success envelope while
+    // still exiting 1 when anything failed.
+    RunResult::Health { data, text, healthy }
 }
 
 fn check_store() -> Check {

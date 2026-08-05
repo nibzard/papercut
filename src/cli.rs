@@ -16,7 +16,16 @@ use crate::output::OutputMode;
                   Exit codes: 0 success · 1 report NOT recorded / real failure · 2 usage error.\n\
                   Every command takes --output json for the stable envelope:\n\
                   { schema_version, status, data, errors[] }.\n\
-                  Capture never fails your task; the hook path is invisible."
+                  Capture never fails your task; the hook path is invisible.",
+    after_long_help = "EXAMPLES:\n\
+                  $ papercut add 'docs build needs -dmflag'\n\
+                  $ papercut add 'flaky test' --task PROJ-42 --category tooling --output json\n\
+                  $ papercut list --repo . --status open --since 7\n\
+                  $ papercut render --write\n\
+                  $ papercut install\n\
+                  $ papercut doctor\n\
+                  $ papercut sweep\n\
+                  $ papercut triage-pack --repo . --max-tokens 8000"
 )]
 pub struct Cli {
     /// Output mode. `json` emits the stable envelope; `text` (default) is terse.

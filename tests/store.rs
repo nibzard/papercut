@@ -90,3 +90,67 @@ fn orphaned_tmp_files_are_ignored() {
     assert!(events.is_empty());
     assert!(skipped.is_empty());
 }
+
+/// A `fixed` event whose `ref` is an empty string is quarantined on load. serde
+/// deserializes `"ref":""` as `Some("")` (not `None`), so an `is_none()`-only
+/// check would let it through. The reason must name the file and the rule.
+#[test]
+fn fixed_with_empty_ref_is_skipped_on_load() {
+    let _env = IsolatedEnv::new();
+    papercut::store::ensure_store().unwrap();
+    let json = r#"{
+        "schema_version": 1,
+        "id": "pc_01K000000000000000000000B",
+        "created_at": "2026-08-04T20:42:00Z",
+        "source": "in_moment",
+        "status": "fixed",
+        "summary": "x",
+        "context": {},
+        "resolution": { "reason": "done", "ref": "" }
+    }"#;
+    std::fs::write(
+        papercut::store::events_dir()
+            .unwrap()
+            .join("pc_01K000000000000000000000B.json"),
+        json,
+    )
+    .unwrap();
+
+    let (events, skipped) = papercut::store::read_all_events();
+    assert!(events.is_empty(), "empty-ref fixed event is quarantined");
+    assert_eq!(skipped.len(), 1);
+    assert!(skipped[0].reason.contains("fixed"));
+    assert!(skipped[0].reason.contains("ref"));
+}
+
+/// Reopening a fixed papercut (editing `status` back to `open` but leaving the
+/// resolution) is the documented one-field-edit workflow. It must NOT be
+/// quarantined — otherwise a previously-valid event silently disappears from
+/// `list` and the triage pack.
+#[test]
+fn reopened_event_keeping_resolution_loads() {
+    let _env = IsolatedEnv::new();
+    papercut::store::ensure_store().unwrap();
+    let json = r#"{
+        "schema_version": 1,
+        "id": "pc_01K000000000000000000000C",
+        "created_at": "2026-08-04T20:42:00Z",
+        "source": "in_moment",
+        "status": "open",
+        "summary": "recurred",
+        "context": {},
+        "resolution": { "reason": "previously fixed", "ref": "abc1234" }
+    }"#;
+    std::fs::write(
+        papercut::store::events_dir()
+            .unwrap()
+            .join("pc_01K000000000000000000000C.json"),
+        json,
+    )
+    .unwrap();
+
+    let (events, skipped) = papercut::store::read_all_events();
+    assert!(skipped.is_empty(), "reopened event must not be quarantined");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].status, papercut::model::Status::Open);
+}

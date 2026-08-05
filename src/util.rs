@@ -15,6 +15,13 @@ pub const FIELD_MAX: usize = 512;
 /// and exits 0). Bounds memory so a runaway stdin can never OOM the hook into
 /// a non-zero exit — the hook path must always be silent and infallible.
 pub const STDIN_MAX: usize = 1024 * 1024;
+/// Maximum quarantined-file entries listed inline in any single projection.
+/// Keeps a store with many corrupt files from bloating `list`/`render`/triage
+/// output; the rest are summarized as "+N more".
+pub const SKIPPED_LIST_MAX: usize = 20;
+/// Maximum characters kept from a skipped-file reason. OS/serde error strings
+/// are not bounded at capture; this bounds them at projection time.
+pub const SKIPPED_REASON_MAX: usize = 160;
 
 /// Truncate `s` to at most `max` characters on a UTF-8 boundary, appending an
 /// ellipsis when truncation occurs. Never panics on non-UTF-8 boundaries.
