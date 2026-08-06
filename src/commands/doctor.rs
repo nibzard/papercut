@@ -86,20 +86,35 @@ pub fn run() -> RunResult {
         if detected_files.iter().any(|f| **f == rec) {
             continue;
         }
-        let has_block = std::fs::read_to_string(&rec)
-            .ok()
-            .and_then(|c| managed_block::detect_version(&c))
-            .is_some();
-        if has_block {
-            checks.push(Check {
-                name: format!("block:{}:recorded", entry.harness),
-                ok: false,
-                detail: format!("orphaned managed block at recorded path {}", rec.display()),
-                hint: format!(
-                    "run: papercut uninstall --harness {}, then papercut install --yes",
-                    entry.harness
-                ),
-            });
+        // An unreadable recorded file (permission denied, invalid UTF-8) gets
+        // an honest diagnosis — consistent with check_block — instead of being
+        // swallowed as "no block". A missing file is simply nothing to flag.
+        match std::fs::read_to_string(&rec) {
+            Ok(content) => {
+                if managed_block::detect_version(&content).is_some() {
+                    checks.push(Check {
+                        name: format!("block:{}:recorded", entry.harness),
+                        ok: false,
+                        detail: format!(
+                            "orphaned managed block at recorded path {}",
+                            rec.display()
+                        ),
+                        hint: format!(
+                            "run: papercut uninstall --harness {}, then papercut install --yes",
+                            entry.harness
+                        ),
+                    });
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                checks.push(Check {
+                    name: format!("block:{}:recorded", entry.harness),
+                    ok: false,
+                    detail: format!("cannot read recorded path {}: {e}", rec.display()),
+                    hint: "fix the file's permissions or encoding by hand".into(),
+                });
+            }
         }
     }
 

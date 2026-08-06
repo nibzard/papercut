@@ -245,6 +245,100 @@ fn exe_path_with_spaces_is_quoted_and_resolvable() {
     );
 }
 
+/// A spaced exe path that ALSO contains a single quote round-trips through
+/// hook_command's `'` → `'\''` encoding and first_token's decode, so doctor
+/// resolves it. The runtime hook is valid shell; only doctor's read-back broke
+/// before (it stopped at the first quote).
+#[test]
+#[cfg(unix)]
+fn exe_path_with_space_and_apostrophe_round_trips() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = IsolatedEnv::new().with_claude();
+    let dir = env.home.join("Jane's bin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("papercut");
+    std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    papercut::adapters::claude_code::install_hook(&exe.to_string_lossy()).unwrap();
+    let status = papercut::adapters::claude_code::hook_status();
+    assert!(status.present, "entry present: {:?}", status);
+    assert_eq!(
+        status.exe.as_deref(),
+        Some(&*exe.to_string_lossy()),
+        "the full spaced+quoted exe is decoded as one token: {:?}",
+        status.exe
+    );
+    assert!(
+        status.exe_ok,
+        "doctor resolves the wired hook: {:?}",
+        status
+    );
+}
+
+/// A settings.json that is valid JSON but not an object (`[]`, `42`) makes
+/// install refuse ("root is not an object"); doctor must diagnose it too
+/// instead of hinting "run install" — which loops.
+#[test]
+fn doctor_diagnoses_non_object_settings() {
+    let env = IsolatedEnv::new().with_claude();
+    install(true, None);
+    for bad in ["[]", "42", "\"oops\""] {
+        std::fs::write(env.home.join(".claude/settings.json"), bad).unwrap();
+        let data = doctor_data();
+        let adapter = data["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "adapter:claude-code")
+            .unwrap();
+        assert_eq!(adapter["ok"], false, "{bad} must be unhealthy");
+        assert!(
+            adapter["detail"]
+                .as_str()
+                .unwrap()
+                .contains("not an object"),
+            "diagnosis names the wrong type for {bad}: {}",
+            adapter["detail"]
+        );
+        assert!(
+            !adapter["hint"]
+                .as_str()
+                .unwrap()
+                .contains("papercut install"),
+            "hint must not loop into install for {bad}: {}",
+            adapter["hint"]
+        );
+    }
+}
+
+/// An UNREADABLE instructions file at a drifted/recorded path is flagged by
+/// doctor — not silently swallowed as "no block" (consistent with the detected
+/// path check).
+#[test]
+fn doctor_flags_unreadable_recorded_path() {
+    let env = IsolatedEnv::new();
+    std::fs::create_dir_all(env.home.join(".opencode")).unwrap();
+    install(true, Some("opencode"));
+    // Drift: detection moves to XDG; the recorded legacy path is now unreadable.
+    std::fs::create_dir_all(env.home.join(".config/opencode")).unwrap();
+    std::fs::write(env.home.join(".opencode/AGENTS.md"), b"\xff\xfe broken").unwrap();
+
+    let data = doctor_data();
+    let recorded = data["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"].as_str().unwrap_or("").contains("recorded"))
+        .unwrap_or_else(|| panic!("a recorded-path check exists: {data}"));
+    assert_eq!(recorded["ok"], false);
+    assert!(
+        recorded["detail"].as_str().unwrap().contains("cannot read"),
+        "diagnosis names the read failure: {}",
+        recorded["detail"]
+    );
+}
+
 /// Our entry drifted under a non-Bash matcher never fires for Bash — doctor
 /// must read it as missing, and a reinstall must move it back.
 #[test]

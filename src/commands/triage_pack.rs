@@ -9,7 +9,8 @@ use crate::paths::{resolve_repo_filter, RepoScope};
 use crate::query::{current_repo, Filters};
 use crate::signal::read_signals;
 use crate::util::{
-    md_code_span, md_indent_continuation, truncate, SKIPPED_LIST_MAX, SKIPPED_REASON_MAX,
+    md_code_span, md_indent_continuation, md_single_line, truncate, SKIPPED_LIST_MAX,
+    SKIPPED_REASON_MAX,
 };
 use serde_json::json;
 
@@ -232,7 +233,7 @@ fn format_cluster(c: &Cluster) -> String {
         "- **{count}×** {sample} — agents: {agents}; repos: {repos}\n",
         count = c.count,
         sample = md_code_span(&truncate(&c.sample, 80)),
-        agents = truncate(&agents, 60),
-        repos = truncate(&repos, 60),
+        agents = truncate(&md_single_line(&agents), 60),
+        repos = truncate(&md_single_line(&repos), 60),
     )
 }

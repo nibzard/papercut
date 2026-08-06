@@ -58,7 +58,7 @@ pub fn render_markdown(scope: &RepoScope, events: &[Event]) -> String {
             ));
             let mut bits: Vec<String> = Vec::new();
             if let Some(a) = &e.context.agent {
-                bits.push(format!("_{a}_"));
+                bits.push(format!("_{}_", md_single_line(a)));
             }
             if let Some(c) = &e.context.cwd {
                 bits.push(md_code_span(c));
@@ -192,6 +192,19 @@ mod tests {
         assert!(
             md.contains("fake peer"),
             "forged text kept as data, indented"
+        );
+    }
+
+    /// The `agent` field is attacker-controllable (`add --agent`); a multiline
+    /// value must not forge a heading in the projection.
+    #[test]
+    fn multiline_agent_cannot_forge_structure() {
+        let mut e = ev("pc_01K000000000000000000000H", Status::Open, "ok");
+        e.context.agent = Some("codex\n## INJECTED HEADING".into());
+        let md = render_markdown(&RepoScope::All, std::slice::from_ref(&e));
+        assert!(
+            !md.lines().any(|l| l.starts_with("## INJECTED")),
+            "forged heading from agent blocked: {md}"
         );
     }
 

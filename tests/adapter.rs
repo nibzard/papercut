@@ -166,6 +166,26 @@ fn oversized_session_id_still_records() {
     hook(&failure_payload("make test", "Exit code 2\nboom", &long_id));
     let (sigs, _) = papercut::signal::read_signals("claude-code");
     assert_eq!(sigs.len(), 1, "signal kept under a bounded filename");
+
+    // The signal file name itself is capped (filename_session takes 64 chars),
+    // not just the field — so a runaway id cannot produce an ENAMETOOLONG path.
+    let dir = papercut::signal::signals_dir("claude-code").unwrap();
+    let max_stem = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| {
+            e.path()
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
+        .map(|s| s.chars().count())
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max_stem <= 64,
+        "session-id filename is bounded to 64 chars, got {max_stem}"
+    );
 }
 
 #[test]

@@ -261,12 +261,33 @@ pub fn uninstall_hook() -> anyhow::Result<usize> {
 }
 
 /// Diagnose the settings.json file for `doctor`: `None` when the file is
-/// absent, blank, or valid JSON; `Some(reason)` when it exists but cannot be
-/// read or parsed. The lenient read path masks corruption as "no settings",
-/// which would send doctor to a "run install" hint that install refuses to
-/// follow — this gives doctor the honest diagnosis instead.
+/// absent, blank, or a valid JSON object; `Some(reason)` when it exists but
+/// cannot be read, parsed, or is valid JSON of the wrong type (an array or
+/// scalar). The lenient read path masks all of those as "no settings", which
+/// would send doctor to a "run install" hint — but install refuses to overwrite
+/// an unparseable or non-object file, so this gives doctor the honest diagnosis
+/// instead and keeps the two commands from looping.
 pub fn settings_diagnosis() -> Option<String> {
-    load_settings_for_write().err().map(|e| format!("{e:#}"))
+    match load_settings_for_write() {
+        Err(e) => Some(format!("{e:#}")),
+        Ok(v) if !v.is_object() => Some(format!(
+            "~/.claude/settings.json is valid JSON but not an object ({}) — install refuses to overwrite it; back it up and repair it by hand",
+            json_type_label(&v)
+        )),
+        Ok(_) => None,
+    }
+}
+
+/// One-word JSON type label for the diagnosis message.
+fn json_type_label(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 /// Is our failure-hook entry present in settings.json (under [`HOOK_EVENT`])?
@@ -290,6 +311,7 @@ pub fn hook_wired() -> bool {
 /// executable it points at actually resolves to a runnable file. A present entry
 /// whose `exe` is missing or non-executable is a dead hook — `doctor` must not
 /// call it healthy.
+#[derive(Debug)]
 pub struct HookStatus {
     pub present: bool,
     pub exe_ok: bool,
@@ -337,28 +359,69 @@ pub fn hook_status() -> HookStatus {
     }
 }
 
-/// The executable token from a command string `<exe> _hook claude-code`. A
-/// leading single- or double-quoted token (the shape [`hook_command`] emits
-/// for paths with spaces) is read to its closing quote; otherwise the token
-/// ends at the first whitespace. `None` if the command has no token.
+/// The executable token from a command string `<exe> _hook claude-code`. This
+/// is the inverse of [`hook_command`]: a leading single-quoted token is decoded
+/// back through the `'\''` idiom (so a spaced path that also contains a single
+/// quote round-trips as one token), a leading double-quoted token is read to its
+/// closing quote, and an unquoted token ends at the first whitespace. `None` if
+/// the command has no token.
 fn first_token(cmd: &str) -> Option<String> {
     let cmd = cmd.trim_start();
-    for quote in ['\'', '"'] {
-        if let Some(rest) = cmd.strip_prefix(quote) {
-            let end = rest.find(quote)?;
-            let tok = &rest[..end];
-            return if tok.is_empty() {
-                None
-            } else {
-                Some(tok.to_string())
-            };
-        }
+    if let Some(rest) = cmd.strip_prefix('\'') {
+        return Some(decode_single_quoted(rest));
+    }
+    if let Some(rest) = cmd.strip_prefix('"') {
+        let end = rest.find('"')?;
+        let tok = &rest[..end];
+        return if tok.is_empty() {
+            None
+        } else {
+            Some(tok.to_string())
+        };
     }
     let tok = cmd.split_whitespace().next()?;
     if tok.is_empty() {
         None
     } else {
         Some(tok.to_string())
+    }
+}
+
+/// Decode the body of a single-quoted shell token (the text after the opening
+/// `'`), reversing [`hook_command`]'s `'` → `'\''` encoding. The `'\''` sequence
+/// (close, backslash-escaped quote, reopen) is one literal `'`; a lone `'` ends
+/// the token. Returns the decoded value; an unterminated token yields what was
+/// read so far (best effort — the command came from our own settings file).
+fn decode_single_quoted(after_open: &str) -> String {
+    let mut chars = after_open.chars().peekable();
+    let mut out = String::new();
+    loop {
+        // Literal run up to the next quote.
+        while let Some(&c) = chars.peek() {
+            if c == '\'' {
+                break;
+            }
+            out.push(c);
+            chars.next();
+        }
+        // Consume the quote that ended the run (or end on EOF).
+        if chars.next() != Some('\'') {
+            return out;
+        }
+        // `'\''` idiom? After the close, the next two chars are `\'`.
+        let mut look = chars.clone();
+        if look.next() == Some('\\') && look.next() == Some('\'') {
+            chars.next(); // '\'
+            chars.next(); // '\''
+                          // The following `'` reopens the quote; consume it as the start of
+                          // the next literal run.
+            if chars.peek() == Some(&'\'') {
+                chars.next();
+            }
+            out.push('\'');
+            continue;
+        }
+        return out; // lone close
     }
 }
 
