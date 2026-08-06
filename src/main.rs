@@ -6,6 +6,18 @@ use serde_json::Value;
 
 fn main() {
     let mode = detect_output_mode();
+
+    // The hook path is silent and infallible from the caller's point of view.
+    // Intercept it BEFORE clap: corrupted settings.json wiring can invoke the
+    // hook with a missing or malformed argument, and that must never reach
+    // clap's usage-error path (exit 2 + stderr) — which Claude Code surfaces.
+    // A missing harness arg no-ops; any error is swallowed; always exit 0.
+    if std::env::args().nth(1).as_deref() == Some("_hook") {
+        let harness = std::env::args().nth(2).unwrap_or_default();
+        papercut::commands::hook::run(papercut::cli::HookArgs { harness });
+        std::process::exit(0);
+    }
+
     let code = match Cli::try_parse() {
         Ok(cli) => papercut::run(cli),
         Err(e) => match e.kind() {

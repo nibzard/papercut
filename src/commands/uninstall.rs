@@ -8,7 +8,7 @@
 
 use crate::app::RunResult;
 use crate::cli::UninstallArgs;
-use crate::harness::{detect, filter_detected, filter_selects};
+use crate::harness::{detect, filter_detected, filter_selects, unknown_harness_error};
 use crate::managed_block;
 use crate::output::ErrorItem;
 use crate::store;
@@ -25,6 +25,9 @@ struct Target {
 
 pub fn run(args: UninstallArgs) -> RunResult {
     let filter = args.harness.as_deref();
+    if let Some(item) = unknown_harness_error(&args.harness) {
+        return RunResult::usage(item);
+    }
     let selected = filter_detected(detect(), filter);
 
     let mut results: Vec<Value> = Vec::new();

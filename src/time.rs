@@ -19,7 +19,9 @@ pub fn now_unix() -> u64 {
 }
 
 /// Parse an RFC 3339 UTC string (`YYYY-MM-DDTHH:MM:SSZ`) to Unix seconds.
-/// Returns `None` for anything unparseable; callers must tolerate it.
+/// Returns `None` for anything unparseable or out of range; callers must
+/// tolerate it. Pre-1970 dates clamp to 0 rather than wrapping a negative day
+/// count into a huge `u64` (which would make an ancient event sort as newest).
 pub fn parse_rfc3339_unix(s: &str) -> Option<u64> {
     let y = s.get(0..4)?.parse::<i64>().ok()?;
     let mo = s.get(5..7)?.parse::<u32>().ok()?;
@@ -27,7 +29,18 @@ pub fn parse_rfc3339_unix(s: &str) -> Option<u64> {
     let h: u64 = s.get(11..13)?.parse().ok()?;
     let mi: u64 = s.get(14..16)?.parse().ok()?;
     let se: u64 = s.get(17..19)?.parse().ok()?;
+    // Reject out-of-range fields instead of feeding them to the calendar and
+    // getting a silent garbage timestamp.
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || se > 59 {
+        return None;
+    }
     let days = days_from_civil(y, mo, d);
+    // Clamp any pre-epoch timestamp to the epoch, so a corrupt/hand-edited 1969
+    // (or earlier) value cannot wrap negative days into ~2^64 seconds and then
+    // sort as the newest event under an age filter.
+    if days <= 0 {
+        return Some(0);
+    }
     Some(days as u64 * 86_400 + h * 3600 + mi * 60 + se)
 }
 
@@ -111,5 +124,21 @@ mod tests {
     fn parse_rejects_garbage() {
         assert_eq!(parse_rfc3339_unix("nonsense"), None);
         assert_eq!(parse_rfc3339_unix(""), None);
+    }
+
+    #[test]
+    fn parse_rejects_out_of_range_fields() {
+        assert_eq!(parse_rfc3339_unix("2026-13-01T00:00:00Z"), None, "month 13");
+        assert_eq!(parse_rfc3339_unix("2026-00-01T00:00:00Z"), None, "month 0");
+        assert_eq!(parse_rfc3339_unix("2026-08-32T00:00:00Z"), None, "day 32");
+        assert_eq!(parse_rfc3339_unix("2026-08-04T24:00:00Z"), None, "hour 24");
+    }
+
+    #[test]
+    fn parse_clamps_pre_epoch_to_zero() {
+        // A corrupt/hand-edited 1969 timestamp must not wrap into a huge u64
+        // (which would sort as the newest event under an age filter).
+        assert_eq!(parse_rfc3339_unix("1969-12-31T23:59:59Z"), Some(0));
+        assert_eq!(parse_rfc3339_unix("1900-01-01T00:00:00Z"), Some(0));
     }
 }

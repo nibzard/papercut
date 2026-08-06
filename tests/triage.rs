@@ -28,6 +28,7 @@ fn pack_full(repo: &str, status: Option<Status>, max_tokens: u32) -> (String, Va
         RunResult::Ok { text, data } => (text, data),
         RunResult::Health { .. } => panic!("triage-pack unexpectedly returned Health"),
         RunResult::Err { errors, .. } => panic!("triage-pack failed: {errors:?}"),
+        RunResult::Usage { errors } => panic!("triage-pack usage error: {errors:?}"),
     }
 }
 

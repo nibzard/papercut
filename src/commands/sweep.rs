@@ -2,10 +2,14 @@
 
 use crate::app::RunResult;
 use crate::cli::SweepArgs;
+use crate::harness::unknown_harness_error;
 use crate::output::ErrorItem;
 use serde_json::{json, Value};
 
 pub fn run(args: SweepArgs) -> RunResult {
+    if let Some(item) = unknown_harness_error(&args.harness) {
+        return RunResult::usage(item);
+    }
     let want_codex = match args.harness.as_deref() {
         None => true,
         Some(s) => s.split(',').any(|x| x.trim() == "codex"),

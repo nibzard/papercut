@@ -79,10 +79,10 @@ pub fn run(args: RenderArgs) -> RunResult {
                 ));
             }
         }
-        if let Err(e) = std::fs::write(&path, &md) {
+        if let Err(e) = crate::store::write_atomic(&path, md.as_bytes()) {
             return RunResult::err(ErrorItem::new(
                 "write_failed",
-                format!("cannot write {}: {e}", path.display()),
+                format!("cannot write {}: {e:#}", path.display()),
                 true,
                 "check file permissions",
             ));

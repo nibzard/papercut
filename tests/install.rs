@@ -28,6 +28,7 @@ fn doctor_data() -> Value {
         RunResult::Health { data, .. } => data,
         RunResult::Ok { data, .. } => data,
         RunResult::Err { errors, .. } => panic!("doctor returned Err: {errors:?}"),
+        RunResult::Usage { errors } => panic!("doctor returned Usage: {errors:?}"),
     }
 }
 
@@ -542,6 +543,53 @@ fn user_empty_hooks_key_survives_uninstall() {
     );
 }
 
+/// Orphaned `.tmp` files in events/ (interrupted atomic writes) are invisible
+/// to reads but accumulate; doctor reports them with a cleanup hint. It never
+/// deletes them.
+#[test]
+fn doctor_reports_orphaned_tmp_files() {
+    let _env = IsolatedEnv::new().with_claude();
+    papercut::store::ensure_store().unwrap();
+    std::fs::write(
+        papercut::store::events_dir()
+            .unwrap()
+            .join("pc_01KTMP0000000000000000A.json.tmp"),
+        "leftover",
+    )
+    .unwrap();
+
+    let data = doctor_data();
+    let tmp_check = data["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "orphaned_tmp")
+        .unwrap();
+    // Informational: never fails the overall health on its own.
+    assert_eq!(tmp_check["ok"], true);
+    assert!(
+        tmp_check["detail"]
+            .as_str()
+            .unwrap()
+            .contains("1 orphaned .tmp"),
+        "reports the leftover: {}",
+        tmp_check["detail"]
+    );
+    assert!(
+        tmp_check["hint"].as_str().unwrap().contains("rm "),
+        "hint offers a cleanup command: {}",
+        tmp_check["hint"]
+    );
+    // doctor did not delete it.
+    assert!(
+        papercut::store::events_dir()
+            .unwrap()
+            .join("pc_01KTMP0000000000000000A.json.tmp")
+            .exists(),
+        "doctor reports, never deletes"
+    );
+}
+
 /// `doctor` must never crash on an unwritable store — it reports the failure.
 #[test]
 fn doctor_flags_unwritable_store() {
@@ -571,6 +619,7 @@ fn harness_filter_restricts_install_and_uninstall() {
         RunResult::Ok { data, .. } => data,
         RunResult::Err { errors, .. } => panic!("install failed: {errors:?}"),
         RunResult::Health { .. } => panic!("install unexpectedly returned Health"),
+        RunResult::Usage { errors } => panic!("install usage error: {errors:?}"),
     };
     let installed: Vec<&str> = data["installed"]
         .as_array()

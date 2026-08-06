@@ -118,6 +118,80 @@ fn install_without_yes_is_usage_error() {
     assert!(err.contains("--yes"), "the error names the flag: {err}");
 }
 
+/// An unknown `--harness` id is a usage error (exit 2), never a silent no-op —
+/// across sweep, install, and uninstall.
+#[test]
+fn unknown_harness_is_usage_error_exit_2() {
+    let _env = IsolatedEnv::new();
+    // install needs --yes too (it is required), so the only usage fault here
+    // is the unknown harness id.
+    let cases: &[&[&str]] = &[
+        &["--output", "json", "sweep", "--harness", "codx"],
+        &["--output", "json", "install", "--yes", "--harness", "codx"],
+        &["--output", "json", "uninstall", "--harness", "codx"],
+    ];
+    for args in cases {
+        let (c, out, _err) = run(args);
+        assert_eq!(c, 2, "unknown harness must exit 2: {args:?}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["status"], "error", "envelope status: {args:?}");
+        assert_eq!(
+            v["errors"][0]["code"], "unknown_harness",
+            "error code: {args:?}"
+        );
+        assert!(
+            v["errors"][0]["hint"]
+                .as_str()
+                .unwrap()
+                .contains("known harness ids"),
+            "hint lists valid ids: {args:?}"
+        );
+    }
+}
+
+/// doctor unhealthy: the JSON envelope's status must agree with the exit code
+/// (status `error`, an `unhealthy` error item, exit 1) — not `status: ok` with
+/// a buried `data.healthy: false`.
+#[test]
+fn doctor_unhealthy_envelope_matches_exit_code() {
+    let _env = IsolatedEnv::new().with_claude();
+    // No install → doctor finds the block missing → unhealthy.
+    let (c, out, _err) = run(&["--output", "json", "doctor"]);
+    assert_eq!(c, 1, "unhealthy doctor exits 1");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["status"], "error", "envelope status agrees with exit 1");
+    assert_eq!(v["errors"][0]["code"], "unhealthy");
+    assert_eq!(
+        v["data"]["healthy"], false,
+        "full checks payload still present"
+    );
+}
+
+/// The hook path must stay silent and exit 0 even on a malformed invocation
+/// (corrupted wiring). `_hook` with NO harness arg, and with a bad extra flag,
+/// must never reach clap's usage-error path (exit 2 + stderr).
+#[test]
+fn hook_malformed_invocation_is_silent_exit_0() {
+    let _env = IsolatedEnv::new();
+
+    // Missing harness arg: no-op, silent, exit 0.
+    let (c, out, err) = run(&["_hook"]);
+    assert_eq!(c, 0, "missing hook arg still exits 0");
+    assert!(
+        out.is_empty() && err.is_empty(),
+        "silent on missing arg: {err}"
+    );
+
+    // An extra flag after the harness must not trip clap (exit 2). The hook
+    // runs with the harness it got and ignores the rest, silent, exit 0.
+    let (c, out, err) = run(&["_hook", "claude-code", "--bogus-flag"]);
+    assert_eq!(c, 0, "extra hook arg still exits 0, not clap's 2");
+    assert!(
+        out.is_empty() && err.is_empty(),
+        "silent on extra arg: {err}"
+    );
+}
+
 #[test]
 fn json_envelope_shape_on_error() {
     let _env = IsolatedEnv::new();

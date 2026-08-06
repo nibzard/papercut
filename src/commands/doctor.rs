@@ -26,6 +26,12 @@ pub fn run() -> RunResult {
     // 1. Store exists and is writable.
     checks.push(check_store());
 
+    // 1b. Orphaned .tmp files in events/ — leftovers from an interrupted atomic
+    // write. They never corrupt reads (is_event_file excludes them) but they
+    // accumulate; surface them so a human can clean up. Reported, never deleted
+    // by doctor.
+    checks.push(check_orphaned_tmp());
+
     // 2. Agent detection — informational only: `unknown` is an acceptable
     // outcome by design, so there is no failing state to gate on.
     let info = crate::detect::detect();
@@ -189,6 +195,44 @@ fn check_claude_adapter() -> Check {
             "run: papercut install --yes".into()
         } else {
             "reinstall papercut, or fix the hook command path".into()
+        },
+    }
+}
+
+/// Count leftover `.tmp` files in events/ (interrupted atomic writes). They are
+/// invisible to reads but accumulate; this is informational, reported as a hint
+/// — doctor never deletes them.
+fn check_orphaned_tmp() -> Check {
+    let Some(dir) = crate::store::events_dir() else {
+        return Check {
+            name: "orphaned_tmp".into(),
+            ok: true,
+            detail: "no home data dir".into(),
+            hint: String::new(),
+        };
+    };
+    let count = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count(),
+        Err(_) => 0,
+    };
+    Check {
+        name: "orphaned_tmp".into(),
+        // Orphaned tmp files are never fatal (reads skip them), so this check
+        // is informational: ok regardless of count, with a cleanup hint when any
+        // are present.
+        ok: true,
+        detail: if count == 0 {
+            "none".into()
+        } else {
+            format!("{count} orphaned .tmp file(s) in events/")
+        },
+        hint: if count == 0 {
+            String::new()
+        } else {
+            "safe to delete: rm ~/.local/share/papercuts/events/*.tmp".into()
         },
     }
 }

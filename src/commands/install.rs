@@ -2,7 +2,9 @@
 
 use crate::app::RunResult;
 use crate::cli::InstallArgs;
-use crate::harness::{detect, filter_detected, DetectedHarness, HarnessTier};
+use crate::harness::{
+    detect, filter_detected, unknown_harness_error, DetectedHarness, HarnessTier,
+};
 use crate::managed_block::{self, Action};
 use crate::output::ErrorItem;
 use crate::store::{self, AdapterState, InstalledHarness};
@@ -11,6 +13,9 @@ use std::path::Path;
 
 pub fn run(args: InstallArgs) -> RunResult {
     let _ = args.yes; // clap requires the flag; install itself never prompts.
+    if let Some(item) = unknown_harness_error(&args.harness) {
+        return RunResult::usage(item);
+    }
     let detected = detect();
     let selected = filter_detected(detected, args.harness.as_deref());
 

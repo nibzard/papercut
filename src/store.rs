@@ -26,9 +26,28 @@ pub fn events_dir() -> Option<PathBuf> {
 /// Ensure the store's directory tree exists.
 pub fn ensure_store() -> anyhow::Result<()> {
     let root = data_root().context("no home data dir: set $HOME or $XDG_DATA_HOME")?;
-    std::fs::create_dir_all(root.join("events")).context("create events dir")?;
-    std::fs::create_dir_all(root.join("signals")).context("create signals dir")?;
+    create_private_dir(&root)?;
+    create_private_dir(&root.join("events"))?;
+    create_private_dir(&root.join("signals"))?;
     Ok(())
+}
+
+/// Create `path` (and parents) with mode 0700 on unix, so the private store is
+/// owner-only by default, not just private-by-location. Existing dirs are left
+/// as-is (a user may have intentionally widened them).
+#[cfg(unix)]
+fn create_private_dir(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .with_context(|| format!("create {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(path: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))
 }
 
 /// Write `bytes` to `final_path` atomically: temp file in the same directory,
@@ -242,7 +261,9 @@ pub fn write_config(cfg: &Config) -> anyhow::Result<()> {
     ensure_store()?;
     let path = config_path().context("no home data dir: set $HOME or $XDG_DATA_HOME")?;
     let bytes = serde_json::to_vec_pretty(cfg).context("serialize config")?;
-    std::fs::write(path, bytes).context("write config.json")?;
+    // Atomic: a torn config.json would lose install bookkeeping and make
+    // doctor/uninstall misreport state.
+    write_atomic(&path, &bytes).context("write config.json")?;
     Ok(())
 }
 

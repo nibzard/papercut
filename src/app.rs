@@ -23,10 +23,16 @@ pub enum RunResult {
     /// not lose the successful work; `errors` carries one or more structured
     /// errors. The hook path never produces this.
     Err { data: Value, errors: Vec<ErrorItem> },
-    /// A successful diagnostic that may still report problems. `data`/`text`
-    /// are emitted under the normal `ok` envelope; the process exits 0 when
-    /// `healthy` and 1 otherwise. Used by `doctor`: it ran fine (so the full
-    /// checks payload stays in `data`), but problems still surface as exit 1.
+    /// Usage error → exit 2. The invocation parsed, but a value is semantically
+    /// wrong (e.g. `--harness codx` names no known harness). Same exit code as a
+    /// clap parse error, with structured errors so an agent can tell "fix your
+    /// command line" (2) from "something went wrong" (1).
+    Usage { errors: Vec<ErrorItem> },
+    /// A successful diagnostic that may still report problems. The full checks
+    /// payload rides in `data`; the process exits 0 when `healthy` and 1
+    /// otherwise. When unhealthy the JSON envelope carries status `error` plus
+    /// an `unhealthy` error item, so a consumer that trusts the envelope's
+    /// status agrees with one that trusts the exit code. Used by `doctor`.
     Health {
         data: Value,
         text: String,
@@ -41,6 +47,11 @@ impl RunResult {
             data: Value::Null,
             errors: vec![item],
         }
+    }
+
+    /// Single-error convenience for a usage error (exit 2).
+    pub fn usage(item: ErrorItem) -> Self {
+        Self::Usage { errors: vec![item] }
     }
 }
 
@@ -81,7 +92,25 @@ pub fn run(cli: Cli) -> i32 {
             healthy,
         } => {
             match mode {
-                OutputMode::Json => print_json(&envelope_ok(data)),
+                OutputMode::Json => {
+                    if healthy {
+                        print_json(&envelope_ok(data));
+                    } else {
+                        // The envelope's status must agree with the exit code:
+                        // unhealthy is status `error` with an `unhealthy` item,
+                        // while the full checks payload still rides in `data`.
+                        let hint = doctor_failure_hint(&data);
+                        print_json(&envelope_err(
+                            data,
+                            vec![ErrorItem::new(
+                                "unhealthy",
+                                "one or more doctor checks failed",
+                                false,
+                                hint,
+                            )],
+                        ));
+                    }
+                }
                 OutputMode::Text => println!("{text}"),
             }
             if healthy {
@@ -89,6 +118,17 @@ pub fn run(cli: Cli) -> i32 {
             } else {
                 1
             }
+        }
+        RunResult::Usage { errors } => {
+            match mode {
+                OutputMode::Json => print_json(&envelope_err(Value::Null, errors.clone())),
+                OutputMode::Text => {
+                    for item in &errors {
+                        eprintln!("error: {}", item.message);
+                    }
+                }
+            }
+            2
         }
         RunResult::Err { data, errors } => {
             match mode {
@@ -101,5 +141,24 @@ pub fn run(cli: Cli) -> i32 {
             }
             1
         }
+    }
+}
+
+/// Build the `hint` for the doctor-unhealthy error item: the per-check hints of
+/// every failing check, joined. Falls back to pointing at `doctor` itself when
+/// no check carried a hint.
+fn doctor_failure_hint(data: &Value) -> String {
+    let Some(checks) = data["checks"].as_array() else {
+        return "run: papercut doctor".into();
+    };
+    let hints: Vec<&str> = checks
+        .iter()
+        .filter(|c| c["ok"].as_bool() == Some(false))
+        .filter_map(|c| c["hint"].as_str().filter(|h| !h.is_empty()))
+        .collect();
+    if hints.is_empty() {
+        "run: papercut doctor for details".into()
+    } else {
+        hints.join("; ")
     }
 }

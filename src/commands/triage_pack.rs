@@ -50,7 +50,6 @@ struct Cluster {
     key: String,
     sample: String,
     count: usize,
-    exits: Vec<i32>,
     repos: BTreeSet<String>,
     agents: BTreeSet<String>,
 }
@@ -73,12 +72,10 @@ fn cluster_signals(scope: &RepoScope) -> Vec<Cluster> {
                 key: key.clone(),
                 sample: s.cmd.clone(),
                 count: 0,
-                exits: Vec::new(),
                 repos: BTreeSet::new(),
                 agents: BTreeSet::new(),
             });
             c.count += 1;
-            c.exits.push(s.exit);
             if let Some(r) = s.repo {
                 c.repos.insert(r);
             }

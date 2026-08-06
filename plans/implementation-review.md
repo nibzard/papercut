@@ -1,5 +1,12 @@
 # PLAN.md implementation review
 
+> **Superseded (2026-08-06).** The criticals and contract gaps below were
+> addressed by commit `5f8cd37` (path traversal, cross-run pending calls,
+> watermark-on-failure, repo context, load-time validation, render warnings,
+> clap→JSON envelope, help examples, token budget). The remaining items and a
+> fresh full-project review live in [`review-2026-08-06.md`](review-2026-08-06.md),
+> whose fix pass is tracked there. This file is kept as a historical record.
+
 Date: 2026-08-04
 
 `cargo test --all-targets` and Clippy pass, but the implementation is not yet

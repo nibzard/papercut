@@ -160,3 +160,43 @@ pub fn filter_selects(filter: Option<&str>, id: &str) -> bool {
         Some(list) => list.split(',').map(str::trim).any(|w| w == id),
     }
 }
+
+/// The ids in a comma-separated `filter` that name no known harness. Empty when
+/// `filter` is `None` or every requested id is in the catalog. Used to turn a
+/// typo like `--harness codx` from a silent no-op into a usage error.
+pub fn unknown_requested(filter: Option<&str>) -> Vec<String> {
+    let Some(list) = filter else {
+        return Vec::new();
+    };
+    let known: Vec<&str> = catalog().iter().map(|d| d.id).collect();
+    list.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter(|s| !known.contains(s))
+        .map(str::to_string)
+        .collect()
+}
+
+/// A comma-separated list of every known harness id, for error hints.
+pub fn known_ids() -> String {
+    catalog()
+        .iter()
+        .map(|d| d.id)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A usage `ErrorItem` when `filter` names unknown harness ids, else `None`.
+/// Shared by install/uninstall/sweep so a typo is never a silent no-op.
+pub fn unknown_harness_error(filter: &Option<String>) -> Option<crate::output::ErrorItem> {
+    let unknown = unknown_requested(filter.as_deref());
+    if unknown.is_empty() {
+        return None;
+    }
+    Some(crate::output::ErrorItem::new(
+        "unknown_harness",
+        format!("unknown harness id(s): {}", unknown.join(", ")),
+        false,
+        format!("known harness ids: {}", known_ids()),
+    ))
+}
