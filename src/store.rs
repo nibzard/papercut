@@ -31,18 +31,34 @@ pub fn ensure_store() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Write `bytes` to `final_path` atomically: temp file in the same directory,
+/// then rename. Rename is atomic on the same filesystem, so a process killed
+/// mid-write leaves no partial file. On failure the temp file is removed
+/// (best-effort) so it cannot accumulate.
+pub(crate) fn write_atomic(final_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let name = final_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("atomic write target has no file name")?;
+    let tmp_path = final_path.with_file_name(format!("{name}.tmp"));
+    if let Err(e) = std::fs::write(&tmp_path, bytes) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e).with_context(|| format!("write temp file {}", tmp_path.display()));
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, final_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e).with_context(|| format!("commit {}", final_path.display()));
+    }
+    Ok(())
+}
+
 /// Atomically write an event to `events/<id>.json` (pretty JSON).
 pub fn write_event(event: &Event) -> anyhow::Result<PathBuf> {
     ensure_store()?;
     let dir = events_dir().context("no home data dir: set $HOME or $XDG_DATA_HOME")?;
     let final_path = dir.join(format!("{}.json", event.id));
-    let tmp_path = dir.join(format!("{}.json.tmp", event.id));
     let bytes = serde_json::to_vec_pretty(event).context("serialize event")?;
-    std::fs::write(&tmp_path, &bytes)
-        .with_context(|| format!("write temp event {}", tmp_path.display()))?;
-    // rename is atomic on the same filesystem (temp lives in the same dir).
-    std::fs::rename(&tmp_path, &final_path)
-        .with_context(|| format!("commit event {}", final_path.display()))?;
+    write_atomic(&final_path, &bytes)?;
     Ok(final_path)
 }
 
@@ -238,28 +254,47 @@ pub struct Sweeps {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SweepMark {
-    /// RFC 3339 ts of the most recent signal extracted, "" if none yet.
-    pub last_ts: String,
-    /// Absolute path of the last file processed.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    /// Per-file progress: absolute session-file path → its mark. Every file
+    /// keeps its own offset, pending calls, and session context, so parallel
+    /// sessions never lose appended content and a call/output pair split
+    /// across sweeps is matched whenever the output arrives.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub files: BTreeMap<String, FileMark>,
+
+    // Legacy single-file watermark, kept for read compatibility only.
+    // `codex::sweep` folds these fields into `files` once, then clears them;
+    // they are never written again. (The old `last_ts` field was dead and is
+    // dropped entirely — unknown fields are ignored on read.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_path: Option<String>,
-    /// Byte offset within `last_path` where the next sweep should resume.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub last_offset: u64,
-    /// `function_call`s seen in `last_path` whose `function_call_output` has not
-    /// arrived yet, persisted so a call/output pair split across two sweeps is
-    /// not silently lost — as long as `last_path` has not advanced to a newer
-    /// swept file (see `codex::sweep`'s known limitation: once the watermark
-    /// advances past this file the pending calls are dropped and the file is
-    /// never revisited, so even a same-file pair can be lost once a newer file
-    /// is swept).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pending_calls: BTreeMap<String, PendingCall>,
-    /// The last `session_meta` context seen in `last_path`, so a resumed file
-    /// still knows its session id / cwd / repo even though `session_meta` lives
-    /// above the resume offset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_session: Option<SessionCtx>,
+}
+
+fn u64_is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+/// Sweep progress within one session file.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FileMark {
+    /// Byte offset where the next sweep resumes.
+    #[serde(default)]
+    pub offset: u64,
+    /// `function_call`s in this file whose `function_call_output` has not
+    /// arrived yet. Persisted so the pair is matched when the output lands,
+    /// even after other files were swept in between.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pending_calls: BTreeMap<String, PendingCall>,
+    /// The `session_meta` context seen in this file, so a resumed file still
+    /// knows its session id / cwd / repo even though `session_meta` lives
+    /// above the resume offset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionCtx>,
 }
 
 /// A `function_call` awaiting its `function_call_output`, persisted in the
@@ -301,7 +336,9 @@ pub fn write_sweeps(s: &Sweeps) -> anyhow::Result<()> {
     ensure_store()?;
     let path = sweeps_path().context("no home data dir: set $HOME or $XDG_DATA_HOME")?;
     let bytes = serde_json::to_vec_pretty(s).context("serialize sweeps")?;
-    std::fs::write(path, bytes).context("write sweeps.json")?;
+    // Atomic so a torn write cannot corrupt the watermark file — a corrupt
+    // sweeps.json falls back to defaults and re-sweeps all history.
+    write_atomic(&path, &bytes).context("write sweeps.json")?;
     Ok(())
 }
 
@@ -435,6 +472,51 @@ mod tests {
             let (got, skipped) = read_all_events();
             assert!(got.is_empty());
             assert!(skipped.is_empty());
+        });
+    }
+
+    #[test]
+    fn legacy_sweep_mark_shape_deserializes() {
+        // The pre-per-file shape, including the removed last_ts field.
+        let json = r#"{"schema_version":1,"marks":{"codex":{"last_ts":"2026-08-04T00:00:00Z","last_path":"/tmp/a.jsonl","last_offset":42,"pending_calls":{"c1":{"cmd":"x","ts":"t"}}}}}"#;
+        let s: Sweeps = serde_json::from_str(json).unwrap();
+        let m = &s.marks["codex"];
+        assert_eq!(m.last_path.as_deref(), Some("/tmp/a.jsonl"));
+        assert_eq!(m.last_offset, 42);
+        assert_eq!(m.pending_calls.len(), 1);
+        assert!(m.files.is_empty());
+    }
+
+    #[test]
+    fn sweep_mark_roundtrips_per_file_map() {
+        let mut m = SweepMark::default();
+        m.files.insert(
+            "/tmp/a.jsonl".into(),
+            FileMark {
+                offset: 7,
+                ..Default::default()
+            },
+        );
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(!json.contains("last_ts"), "dead field stays gone");
+        assert!(!json.contains("last_path"), "cleared legacy fields skipped");
+        let back: SweepMark = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.files["/tmp/a.jsonl"].offset, 7);
+    }
+
+    #[test]
+    fn write_sweeps_leaves_no_tmp_file() {
+        with_store(|| {
+            let mut s = Sweeps::default();
+            s.marks.insert("codex".into(), SweepMark::default());
+            write_sweeps(&s).unwrap();
+            assert!(read_sweeps().marks.contains_key("codex"));
+            let dir = sweeps_path().unwrap().parent().unwrap().to_path_buf();
+            let tmp_left = std::fs::read_dir(dir)
+                .unwrap()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
+            assert!(!tmp_left, "atomic write cleans up its temp file");
         });
     }
 

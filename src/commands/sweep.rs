@@ -2,6 +2,7 @@
 
 use crate::app::RunResult;
 use crate::cli::SweepArgs;
+use crate::output::ErrorItem;
 use serde_json::{json, Value};
 
 pub fn run(args: SweepArgs) -> RunResult {
@@ -11,10 +12,30 @@ pub fn run(args: SweepArgs) -> RunResult {
     };
 
     let mut results: Vec<Value> = Vec::new();
+    let mut errors: Vec<ErrorItem> = Vec::new();
     let mut total = 0usize;
     if want_codex {
         let o = crate::adapters::codex::sweep();
         total += o.signals_emitted;
+        // The CLI path is honest: a signal or watermark that was not persisted
+        // is a real failure (exit 1), not a warning inside an ok envelope.
+        // Partial results still ride along in `data`.
+        if o.emit_failed {
+            errors.push(ErrorItem::new(
+                "sweep_signal_write_failed",
+                "codex: a signal could not be persisted",
+                true,
+                "the failing file's offset was held; re-run sweep to retry — check store permissions",
+            ));
+        }
+        if let Some(e) = &o.watermark_error {
+            errors.push(ErrorItem::new(
+                "sweep_state_write_failed",
+                format!("codex: watermark not persisted: {e}"),
+                true,
+                "signals were recorded but sweeps.json was not written; the next sweep re-reads and may duplicate them — check store permissions",
+            ));
+        }
         results.push(json!({
             "harness": o.harness,
             "signals": o.signals_emitted,
@@ -25,6 +46,9 @@ pub fn run(args: SweepArgs) -> RunResult {
     }
 
     let data = json!({ "results": results, "signals_total": total });
+    if !errors.is_empty() {
+        return RunResult::Err { data, errors };
+    }
     let text = format_sweep(&results, total);
     RunResult::Ok { data, text }
 }

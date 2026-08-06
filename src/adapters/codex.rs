@@ -15,7 +15,7 @@
 
 use crate::paths::home_dir;
 use crate::signal::{append_signal, Signal};
-use crate::store::{read_sweeps, write_sweeps, PendingCall, SessionCtx};
+use crate::store::{read_sweeps, write_sweeps, FileMark, PendingCall, SessionCtx, SweepMark};
 use crate::util::{cap_chars, first_n_lines, truncate, CMD_MAX};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -34,34 +34,32 @@ pub struct SweepOutcome {
     pub sessions_scanned: usize,
     pub sessions_with_commands: usize,
     pub warning: Option<String>,
+    /// A signal could not be appended; the failing file's offset was held so
+    /// the next sweep retries it.
+    #[serde(skip_serializing)]
+    pub emit_failed: bool,
+    /// sweeps.json could not be persisted; the next sweep re-reads the same
+    /// content and can duplicate signals.
+    #[serde(skip_serializing)]
+    pub watermark_error: Option<String>,
 }
 
 /// Sweep new Codex session content since the last run, appending signals.
-/// Idempotent across runs via per-harness byte-offset high-water marks.
+/// Idempotent across runs via per-file byte-offset high-water marks.
 ///
 /// Correctness properties the watermark upholds:
-/// - A `function_call` / `function_call_output` pair split across two sweeps is
-///   matched **while the file remains the watermark's `last_path`**: pending
-///   calls are persisted in `sweeps.json` (`pending_calls`), so an output
-///   appended on the next run still finds its call even though `session_meta`
-///   lives above the resume offset. If a newer file is swept before the output
-///   arrives the pending call is dropped (see the limitation below) and the pair
-///   is not matched.
+/// - Every session file keeps its own mark, so parallel sessions are safe: an
+///   append to an older-sorting file is swept even after newer files were
+///   processed.
+/// - A `function_call` / `function_call_output` pair split across sweeps is
+///   matched whenever the output arrives — the file's pending calls persist in
+///   its `FileMark` and the file is re-entered whenever it grows.
 /// - A signal that fails to persist does not advance the watermark past it: the
 ///   offset is held at the failing line so the next sweep retries, rather than
 ///   committing the offset and silently dropping the signal.
-///
-/// Known limitation (deliberate, given Layer 1 is best-effort): the watermark
-/// tracks a single newest file. When the sweep advances to a newer session file
-/// it drops the previous file's still-unresolved pending calls, and a file once
-/// passed is never revisited. So a `function_call` whose `function_call_output`
-/// is appended only after the watermark has advanced to a newer swept file is
-/// not matched — even when both endpoints live in the *same* file, because once
-/// the watermark advances past it the file is never re-read and its pending call
-/// is dropped. (A newer file merely *appearing* on disk is not enough — while
-/// `last_path` still names this file, a resumed sweep keeps reading it and the
-/// pending call survives.) This affects only interleaved/delayed-output
-/// sessions; the common single-session-in-order case is fully covered.
+/// - A file that shrank (truncated or replaced) is re-read from the start with
+///   a warning: the duplication is bounded to one re-read per shrink event,
+///   while skipping would lose the new content forever.
 pub fn sweep() -> SweepOutcome {
     let mut out = SweepOutcome {
         harness: HARNESS.into(),
@@ -80,73 +78,122 @@ pub fn sweep() -> SweepOutcome {
     }
 
     let mut sweeps = read_sweeps();
-    let mark = sweeps.marks.entry(HARNESS.into()).or_default();
-    let mut last_path = mark.last_path.clone();
-    let mut last_offset = mark.last_offset;
-    // `pending` and `session` belong to `last_path` and ride along the loop.
-    let mut pending = mark.pending_calls.clone();
-    let mut session = mark.last_session.clone();
     let mut unrecognized_files = 0usize;
+    let mut shrunk_files = 0usize;
     let mut emit_failed = false;
+    {
+        let mark = sweeps.marks.entry(HARNESS.into()).or_default();
+        migrate_legacy(mark, &files);
 
-    for file in &files {
-        // Skip files entirely before the watermark (already processed).
-        let already_past = match &last_path {
-            Some(lp) => file.as_path() < Path::new(lp),
-            None => false,
-        };
-        if already_past {
-            continue;
-        }
-        let is_resume = matches!(&last_path, Some(lp) if Path::new(lp) == file.as_path());
-        let resume_offset = if is_resume { last_offset } else { 0 };
-        if !is_resume {
-            // Moving to a new file: the previous file's pending calls and
-            // session context no longer apply.
-            pending.clear();
-            session = None;
+        for file in &files {
+            let key = file.to_string_lossy().into_owned();
+            let fm = mark.files.entry(key).or_default();
+            let len = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+            if len < fm.offset {
+                // The file shrank: it was truncated or replaced, and the old
+                // content is gone. Re-read from the start; stale pending calls
+                // and session context would mis-pair against the new content.
+                *fm = FileMark::default();
+                shrunk_files += 1;
+            }
+            if len <= fm.offset {
+                continue; // nothing new in this file
+            }
+
+            let r = sweep_file(file, fm.offset, &mut fm.pending_calls, &mut fm.session);
+            out.sessions_scanned += 1;
+            if r.had_command_event {
+                out.sessions_with_commands += 1;
+            }
+            out.signals_emitted += r.emitted;
+            if r.unrecognized {
+                unrecognized_files += 1;
+            }
+
+            // Advance this file's offset to its stopping point. On a
+            // persistence failure `new_offset` is already capped at the
+            // failing line.
+            fm.offset = r.new_offset;
+            if r.emit_failed {
+                emit_failed = true;
+                // Stop at the first persistence failure so the offset stays
+                // put and the next sweep retries the failing line. Files not
+                // yet visited keep their own untouched marks.
+                break;
+            }
         }
 
-        let r = sweep_file(file, resume_offset, &mut pending, &mut session);
-        out.sessions_scanned += 1;
-        if r.had_command_event {
-            out.sessions_with_commands += 1;
-        }
-        out.signals_emitted += r.emitted;
-        if r.unrecognized {
-            unrecognized_files += 1;
-        }
-
-        // Advance the watermark to this file's stopping point. On a persistence
-        // failure `new_offset` is already capped at the failing line.
-        last_path = Some(file.to_string_lossy().into_owned());
-        last_offset = r.new_offset;
-        if r.emit_failed {
-            emit_failed = true;
-            // Stop at the first persistence failure so the watermark stays put
-            // and the next sweep retries the failing line.
-            break;
-        }
+        // Deleted session files leave no zombie marks behind.
+        mark.files.retain(|p, _| Path::new(p).exists());
     }
 
+    out.emit_failed = emit_failed;
+    let mut warnings: Vec<String> = Vec::new();
     if emit_failed {
-        out.warning = Some(
+        warnings.push(
             "a signal could not be persisted; the watermark was held so the next sweep retries it"
                 .into(),
         );
-    } else if out.signals_emitted == 0 && out.sessions_with_commands == 0 && unrecognized_files > 0
-    {
-        out.warning = Some(format!(
+    }
+    if shrunk_files > 0 {
+        warnings.push(format!(
+            "{shrunk_files} codex session file(s) shrank; re-read from the start (bounded duplicates possible)"
+        ));
+    }
+    if out.signals_emitted == 0 && out.sessions_with_commands == 0 && unrecognized_files > 0 {
+        warnings.push(format!(
             "codex log format unrecognized in {unrecognized_files} file(s); no signals extracted"
         ));
     }
+    if !warnings.is_empty() {
+        out.warning = Some(warnings.join("; "));
+    }
 
-    mark.last_path = last_path;
-    mark.last_offset = last_offset;
-    mark.pending_calls = pending;
-    mark.last_session = session;
-    let _ = write_sweeps(&sweeps);
+    if let Err(e) = write_sweeps(&sweeps) {
+        out.watermark_error = Some(format!("{e:#}"));
+    }
     out
+}
+
+/// Fold the legacy single-file watermark into the per-file map, once.
+///
+/// Old semantics treated every file that sorts before `last_path` as fully
+/// processed, so those files fast-forward to their current length: no
+/// duplicate emission, and future appends ARE picked up (which the old design
+/// lost). `last_path` itself carries its offset, pending calls, and session
+/// context over verbatim. The legacy fields are cleared and never written
+/// again.
+fn migrate_legacy(mark: &mut SweepMark, files: &[PathBuf]) {
+    let Some(lp) = mark.last_path.take() else {
+        return;
+    };
+    if mark.files.is_empty() {
+        for f in files {
+            let key = f.to_string_lossy().into_owned();
+            if f.as_path() < Path::new(&lp) {
+                let len = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+                mark.files.insert(
+                    key,
+                    FileMark {
+                        offset: len,
+                        ..Default::default()
+                    },
+                );
+            } else if Path::new(&lp) == f.as_path() {
+                mark.files.insert(
+                    key,
+                    FileMark {
+                        offset: mark.last_offset,
+                        pending_calls: std::mem::take(&mut mark.pending_calls),
+                        session: mark.last_session.take(),
+                    },
+                );
+            }
+        }
+    }
+    mark.last_offset = 0;
+    mark.pending_calls.clear();
+    mark.last_session = None;
 }
 
 struct FileResult {
@@ -269,8 +316,7 @@ fn sweep_file(
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            let output =
-                                p.get("output").and_then(|v| v.as_str()).unwrap_or("");
+                            let output = p.get("output").and_then(|v| v.as_str()).unwrap_or("");
                             if let Some(pc) = pending.remove(&call_id) {
                                 if let Some(exit) = parse_exit(output) {
                                     if exit != 0 {

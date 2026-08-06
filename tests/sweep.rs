@@ -16,6 +16,20 @@ const META: &str = r#"{"timestamp":"2026-08-04T20:00:00.000Z","type":"session_me
 const CALL: &str = r#"{"timestamp":"2026-08-04T20:00:01.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"make build\"}","call_id":"c1"}}"#;
 const OUT_FAIL: &str = r#"{"timestamp":"2026-08-04T20:00:02.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"Wall time: 1.0 seconds\nProcess exited with code 2\nOutput:\nError: no rule to make target\nmore\nlines\n"}}"#;
 
+// A second failing pair with its own call id, for append scenarios.
+const CALL2: &str = r#"{"timestamp":"2026-08-04T20:00:04.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo build\"}","call_id":"c2"}}"#;
+const OUT2_FAIL: &str = r#"{"timestamp":"2026-08-04T20:00:05.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c2","output":"Process exited with code 1\nOutput:\nerror[E0308]\n"}}"#;
+
+// A parallel session that sorts after the first one, with its own ids.
+const META_B: &str = r#"{"timestamp":"2026-08-04T21:00:00.000Z","type":"session_meta","payload":{"id":"sess-2","cwd":"/tmp/other","git":{"commit_hash":"def5678"}}}"#;
+const CALL_B: &str = r#"{"timestamp":"2026-08-04T21:00:01.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"npm test\"}","call_id":"d1"}}"#;
+const OUT_B_FAIL: &str = r#"{"timestamp":"2026-08-04T21:00:02.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"d1","output":"Process exited with code 1\nOutput:\n1 failing\n"}}"#;
+
+fn append_rollout(path: &std::path::Path, body: &str) {
+    let mut fh = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    fh.write_all(body.as_bytes()).unwrap();
+}
+
 #[test]
 fn failing_command_produces_signal() {
     let env = IsolatedEnv::new().with_codex();
@@ -68,12 +82,7 @@ fn incremental_sweep_does_not_duplicate_then_picks_up_new() {
     assert_eq!(sigs.len(), 1);
 
     // Append a second failing command with a fresh call_id to the same file.
-    let call2 = r#"{"timestamp":"2026-08-04T20:00:04.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo build\"}","call_id":"c2"}}"#;
-    let out2 = r#"{"timestamp":"2026-08-04T20:00:05.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c2","output":"Process exited with code 1\nOutput:\nerror[E0308]\n"}}"#;
-    let mut fh = std::fs::OpenOptions::new().append(true).open(&f).unwrap();
-    fh.write_all(format!("{call2}\n{out2}\n").as_bytes())
-        .unwrap();
-    drop(fh);
+    append_rollout(&f, &format!("{CALL2}\n{OUT2_FAIL}\n"));
 
     let o3 = codex::sweep();
     assert_eq!(o3.signals_emitted, 1, "appended content is picked up");
@@ -108,7 +117,10 @@ fn call_output_split_across_runs_is_not_lost() {
     drop(fh);
 
     let o2 = codex::sweep();
-    assert_eq!(o2.signals_emitted, 1, "split pair matched across runs, not lost");
+    assert_eq!(
+        o2.signals_emitted, 1,
+        "split pair matched across runs, not lost"
+    );
     let (sigs, _) = papercut::signal::read_signals("codex");
     assert_eq!(sigs.len(), 1);
     assert_eq!(sigs[0].cmd, "make build");
@@ -143,6 +155,67 @@ fn resweep_after_split_does_not_duplicate() {
     assert_eq!(sigs.len(), 1, "still exactly one signal");
 }
 
+/// Two sessions run in parallel: the older-sorting file gets more content
+/// AFTER a sweep has already processed a newer-sorting file. The appended
+/// failures must still be swept — per-file watermarks, not a single
+/// newest-file mark.
+#[test]
+fn parallel_sessions_interleaved_appends_are_both_swept() {
+    let env = IsolatedEnv::new().with_codex();
+    let a = env.home.join(".codex/sessions/2026/08/04/rollout-a.jsonl");
+    let b = env.home.join(".codex/sessions/2026/08/04/rollout-b.jsonl");
+    write_rollout(&a, &format!("{META}\n{CALL}\n{OUT_FAIL}\n"));
+    write_rollout(&b, &format!("{META_B}\n{CALL_B}\n{OUT_B_FAIL}\n"));
+
+    let o1 = codex::sweep();
+    assert_eq!(o1.signals_emitted, 2, "both sessions swept");
+
+    // The older-sorting session is still live and fails again.
+    append_rollout(&a, &format!("{CALL2}\n{OUT2_FAIL}\n"));
+    let o2 = codex::sweep();
+    assert_eq!(
+        o2.signals_emitted, 1,
+        "appends to an older-sorting live session must be swept"
+    );
+
+    let (sigs, _) = papercut::signal::read_signals("codex");
+    assert_eq!(sigs.len(), 3);
+    // The appended failure keeps its own file's session context.
+    let late = sigs.iter().find(|s| s.cmd == "cargo build").unwrap();
+    assert_eq!(late.session.as_deref(), Some("sess-1"));
+    assert_eq!(late.cwd.as_deref(), Some("/tmp/proj"));
+
+    let o3 = codex::sweep();
+    assert_eq!(o3.signals_emitted, 0, "no duplicates on re-sweep");
+}
+
+/// A pending `function_call` in an older file must survive sweeps that touch
+/// newer files, and match its output when that output finally arrives.
+#[test]
+fn pending_call_in_older_file_survives_newer_file_sweep() {
+    let env = IsolatedEnv::new().with_codex();
+    let a = env.home.join(".codex/sessions/2026/08/04/rollout-a.jsonl");
+    let b = env.home.join(".codex/sessions/2026/08/04/rollout-b.jsonl");
+    // File a: call without output yet. File b: a complete failing pair.
+    write_rollout(&a, &format!("{META}\n{CALL}\n"));
+    write_rollout(&b, &format!("{META_B}\n{CALL_B}\n{OUT_B_FAIL}\n"));
+
+    let o1 = codex::sweep();
+    assert_eq!(o1.signals_emitted, 1, "only file b has a complete pair");
+
+    // The output for file a's call arrives after file b was swept.
+    append_rollout(&a, &format!("{OUT_FAIL}\n"));
+    let o2 = codex::sweep();
+    assert_eq!(
+        o2.signals_emitted, 1,
+        "pending call in an older file matches its late output"
+    );
+    let (sigs, _) = papercut::signal::read_signals("codex");
+    let late = sigs.iter().find(|s| s.cmd == "make build").unwrap();
+    assert_eq!(late.exit, 2);
+    assert_eq!(late.session.as_deref(), Some("sess-1"));
+}
+
 #[test]
 fn unknown_format_is_noop_with_warning() {
     let env = IsolatedEnv::new().with_codex();
@@ -156,6 +229,137 @@ fn unknown_format_is_noop_with_warning() {
     assert!(
         o.warning.is_some(),
         "unrecognized format must surface a warning"
+    );
+}
+
+/// A pre-per-file `sweeps.json` (single last_path/last_offset watermark) must
+/// migrate without re-emitting already-swept content, and appends to files the
+/// old watermark had passed must be picked up afterwards.
+#[test]
+fn legacy_watermark_migrates_without_resweep_or_loss() {
+    let env = IsolatedEnv::new().with_codex();
+    let a = env.home.join(".codex/sessions/2026/08/04/rollout-a.jsonl");
+    let b = env.home.join(".codex/sessions/2026/08/04/rollout-b.jsonl");
+    write_rollout(&a, &format!("{META}\n{CALL}\n{OUT_FAIL}\n"));
+    write_rollout(&b, &format!("{META_B}\n{CALL_B}\n{OUT_B_FAIL}\n"));
+
+    // Hand-write the legacy watermark shape: both files fully processed, the
+    // newer file named as last_path. Includes the dead last_ts field.
+    let b_len = std::fs::metadata(&b).unwrap().len();
+    let store_root = env.data.join("papercuts");
+    std::fs::create_dir_all(&store_root).unwrap();
+    std::fs::write(
+        store_root.join("sweeps.json"),
+        format!(
+            r#"{{"schema_version":1,"marks":{{"codex":{{"last_ts":"","last_path":{},"last_offset":{}}}}}}}"#,
+            serde_json::to_string(&b.to_string_lossy()).unwrap(),
+            b_len
+        ),
+    )
+    .unwrap();
+
+    let o1 = codex::sweep();
+    assert_eq!(o1.signals_emitted, 0, "migration must not re-sweep");
+
+    // The old design lost appends to already-passed files; the migrated
+    // per-file map must pick them up.
+    append_rollout(&a, &format!("{CALL2}\n{OUT2_FAIL}\n"));
+    let o2 = codex::sweep();
+    assert_eq!(o2.signals_emitted, 1, "append to a passed file is swept");
+
+    // The legacy fields are gone from the rewritten sweeps.json.
+    let sweeps = papercut::store::read_sweeps();
+    let mark = &sweeps.marks["codex"];
+    assert!(mark.last_path.is_none(), "legacy fields cleared");
+    assert!(!mark.files.is_empty(), "per-file marks written");
+}
+
+/// A session file that shrank (truncated/replaced) is re-read from the start
+/// with a warning, instead of silently never being read again.
+#[test]
+fn shrunk_file_warns_and_resweeps_from_zero() {
+    let env = IsolatedEnv::new().with_codex();
+    let f = env
+        .home
+        .join(".codex/sessions/2026/08/04/rollout-shrink.jsonl");
+    write_rollout(&f, &format!("{META}\n{CALL}\n{OUT_FAIL}\n"));
+    let old_len = std::fs::metadata(&f).unwrap().len();
+    assert_eq!(codex::sweep().signals_emitted, 1);
+
+    // Replace the file with shorter content holding a fresh failing pair.
+    let replacement = format!("{META}\n{CALL2}\n{OUT2_FAIL}\n");
+    assert!(
+        (replacement.len() as u64) < old_len,
+        "fixture must actually shrink the file"
+    );
+    write_rollout(&f, &replacement);
+
+    let o = codex::sweep();
+    assert_eq!(o.signals_emitted, 1, "replaced content is swept");
+    assert!(
+        o.warning.as_deref().is_some_and(|w| w.contains("shrank")),
+        "shrink must surface a warning, got {:?}",
+        o.warning
+    );
+
+    let o2 = codex::sweep();
+    assert_eq!(o2.signals_emitted, 0, "no duplicates after the re-read");
+}
+
+/// Marks for deleted session files are pruned from sweeps.json.
+#[test]
+fn deleted_file_mark_is_pruned() {
+    let env = IsolatedEnv::new().with_codex();
+    let f = env
+        .home
+        .join(".codex/sessions/2026/08/04/rollout-gone.jsonl");
+    let keep = env
+        .home
+        .join(".codex/sessions/2026/08/04/rollout-keep.jsonl");
+    write_rollout(&f, &format!("{META}\n{CALL}\n{OUT_FAIL}\n"));
+    write_rollout(&keep, &format!("{META_B}\n{CALL_B}\n{OUT_B_FAIL}\n"));
+    assert_eq!(codex::sweep().signals_emitted, 2);
+
+    std::fs::remove_file(&f).unwrap();
+    codex::sweep();
+
+    let sweeps = papercut::store::read_sweeps();
+    let files = &sweeps.marks["codex"].files;
+    assert!(
+        !files.contains_key(&*f.to_string_lossy()),
+        "deleted file's mark is pruned"
+    );
+    assert!(
+        files.contains_key(&*keep.to_string_lossy()),
+        "surviving file's mark is kept"
+    );
+}
+
+/// `papercut sweep` exits 1 with a structured error when the watermark cannot
+/// be persisted — signals recorded, honesty preserved.
+#[test]
+fn sweep_exits_1_when_watermark_unpersistable() {
+    let env = IsolatedEnv::new().with_codex();
+    let f = env.home.join(".codex/sessions/2026/08/04/rollout-wm.jsonl");
+    write_rollout(&f, &format!("{META}\n{CALL}\n{OUT_FAIL}\n"));
+
+    // sweeps.json as a DIRECTORY: signal appends succeed, the atomic rename
+    // of the watermark fails.
+    let store_root = env.data.join("papercuts");
+    std::fs::create_dir_all(store_root.join("sweeps.json")).unwrap();
+
+    let out = std::process::Command::new(common::bin())
+        .args(["--output", "json", "sweep"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "watermark failure is exit 1");
+    let env_json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(env_json["status"], "error");
+    assert_eq!(env_json["errors"][0]["code"], "sweep_state_write_failed");
+    assert_eq!(env_json["errors"][0]["retryable"], true);
+    assert_eq!(
+        env_json["data"]["signals_total"], 1,
+        "the signal itself was recorded and reported"
     );
 }
 
