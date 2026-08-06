@@ -261,16 +261,18 @@ pub fn hook_status() -> HookStatus {
         .pointer("/hooks/PostToolUse")
         .and_then(|v| v.as_array())
         .and_then(|arr| {
-            arr.iter().flat_map(|g| {
-                g.get("hooks")
-                    .and_then(|h| h.as_array())
-                    .into_iter()
-                    .flatten()
-            }).find_map(|h| {
-                h.get("command")
-                    .and_then(|c| c.as_str())
-                    .filter(|c| is_our_hook(c))
-            })
+            arr.iter()
+                .flat_map(|g| {
+                    g.get("hooks")
+                        .and_then(|h| h.as_array())
+                        .into_iter()
+                        .flatten()
+                })
+                .find_map(|h| {
+                    h.get("command")
+                        .and_then(|c| c.as_str())
+                        .filter(|c| is_our_hook(c))
+                })
         });
     match cmd {
         None => HookStatus {

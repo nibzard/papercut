@@ -202,7 +202,10 @@ fn build_pack(
         }
         if shown > 0 {
             if shown < skipped.len() {
-                let footer = format!("- … {} more skipped file(s) omitted\n", skipped.len() - shown);
+                let footer = format!(
+                    "- … {} more skipped file(s) omitted\n",
+                    skipped.len() - shown
+                );
                 if out.len() + block.len() + footer.len() <= budget {
                     block.push_str(&footer);
                 }

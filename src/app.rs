@@ -27,7 +27,11 @@ pub enum RunResult {
     /// are emitted under the normal `ok` envelope; the process exits 0 when
     /// `healthy` and 1 otherwise. Used by `doctor`: it ran fine (so the full
     /// checks payload stays in `data`), but problems still surface as exit 1.
-    Health { data: Value, text: String, healthy: bool },
+    Health {
+        data: Value,
+        text: String,
+        healthy: bool,
+    },
 }
 
 impl RunResult {

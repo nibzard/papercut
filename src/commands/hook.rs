@@ -88,8 +88,6 @@ fn capture(harness: &str) -> anyhow::Result<()> {
 /// Captures only a pointer; never fails.
 fn resolve_repo(payload_cwd: Option<&str>) -> Option<String> {
     let cur = std::env::current_dir().ok();
-    let start: &std::path::Path = payload_cwd
-        .map(std::path::Path::new)
-        .or(cur.as_deref())?;
+    let start: &std::path::Path = payload_cwd.map(std::path::Path::new).or(cur.as_deref())?;
     crate::git_meta::repo_of(start)
 }

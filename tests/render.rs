@@ -156,7 +156,12 @@ fn render_write_refuses_unrelated_repo() {
         return;
     }
     let _ = Command::new("git")
-        .args(["remote", "add", "origin", "https://example.com/me/thisrepo.git"])
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://example.com/me/thisrepo.git",
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -338,7 +343,12 @@ fn render_write_lands_in_current_repo() {
         eprintln!("skipping render_write_lands_in_current_repo: git unavailable");
         return;
     }
-    let _ = git_silent(&["remote", "add", "origin", "https://example.com/me/thisrepo.git"]);
+    let _ = git_silent(&[
+        "remote",
+        "add",
+        "origin",
+        "https://example.com/me/thisrepo.git",
+    ]);
 
     let r = commands::render::run(RenderArgs {
         repo: "example.com/me/thisrepo".into(),
@@ -360,8 +370,8 @@ fn render_write_lands_in_current_repo() {
             // canonicalizes symlinks; the temp dir from `std::env::temp_dir()`
             // may not. Compare canonical forms so a symlinked /tmp can't flake
             // the equality (both refer to the same on-disk file).
-            let wrote_canon = std::fs::canonicalize(&wrote)
-                .unwrap_or_else(|_| std::path::PathBuf::from(&wrote));
+            let wrote_canon =
+                std::fs::canonicalize(&wrote).unwrap_or_else(|_| std::path::PathBuf::from(&wrote));
             let md_canon = std::fs::canonicalize(&md_path)
                 .unwrap_or_else(|_| std::path::PathBuf::from(&md_path));
             assert_eq!(wrote_canon, md_canon, "wrote to the repo root");
@@ -389,12 +399,18 @@ fn render_write_global_to_data_root() {
         write: true,
     });
     let wrote = match r {
-        RunResult::Ok { data, .. } => data["write"].as_str().expect("write path recorded").to_string(),
+        RunResult::Ok { data, .. } => data["write"]
+            .as_str()
+            .expect("write path recorded")
+            .to_string(),
         other => panic!("expected global write Ok, got {other:?}"),
     };
     let expected = env.data.join("papercuts").join("PAPERCUTS.md");
     assert_eq!(wrote, expected.to_string_lossy(), "global write target");
-    assert!(expected.exists(), "PAPERCUTS.md created in the private store");
+    assert!(
+        expected.exists(),
+        "PAPERCUTS.md created in the private store"
+    );
     let body = std::fs::read_to_string(&expected).unwrap();
     assert!(body.contains("# Papercuts"), "projection written: {body}");
     assert!(

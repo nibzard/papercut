@@ -217,11 +217,7 @@ fn doctor_flags_dead_hook_pointing_at_missing_exe() {
     std::fs::write(&settings, serde_json::to_string_pretty(&v).unwrap()).unwrap();
 
     let data = doctor_data();
-    assert_eq!(
-        data["healthy"],
-        false,
-        "dead-hook exe must be unhealthy"
-    );
+    assert_eq!(data["healthy"], false, "dead-hook exe must be unhealthy");
     assert!(!check_ok(&data, "adapter:claude-code"));
     let adapter = data["checks"]
         .as_array()
@@ -365,10 +361,10 @@ fn install_hook_accepts_blank_settings_file() {
         std::fs::write(&settings, blank).unwrap();
         papercut::adapters::claude_code::install_hook("/x/papercut")
             .unwrap_or_else(|e| panic!("blank settings must not block install: {e}"));
-        let v: Value =
-            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
         assert!(
-            v["hooks"]["PostToolUse"].pointer("/0/hooks/0/command")
+            v["hooks"]["PostToolUse"]
+                .pointer("/0/hooks/0/command")
                 .is_some(),
             "our hook wired over a blank settings file: {v}"
         );

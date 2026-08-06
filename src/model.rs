@@ -165,9 +165,7 @@ impl Event {
         // `fixed` requires a ref that is present AND non-blank. An absent ref and
         // a wiped-to-`""` ref are the same defect: `serde` deserializes `"ref":""`
         // as `Some("")` (not `None`), so an `is_none()` check alone is bypassed.
-        if self.status == Status::Fixed
-            && r.ref_.as_ref().is_none_or(|rf| rf.trim().is_empty())
-        {
+        if self.status == Status::Fixed && r.ref_.as_ref().is_none_or(|rf| rf.trim().is_empty()) {
             return Err("status `fixed` requires a non-empty resolution.ref".into());
         }
         Ok(())

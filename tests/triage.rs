@@ -100,7 +100,10 @@ fn budget_bounds_events_and_clusters() {
     seed();
     let md = pack("all", None, 1);
     assert!(md.contains("omitted"), "tiny budget omits overflow: {md}");
-    assert!(!md.contains("make build"), "cluster sample dropped under budget");
+    assert!(
+        !md.contains("make build"),
+        "cluster sample dropped under budget"
+    );
     // Under a 1-token budget nothing past the header fits, so the open event is
     // omitted too — events are part of the shared budget, not exempt from it.
     assert!(
@@ -153,10 +156,16 @@ fn pack_scopes_signal_clusters_by_repo() {
     append_signal("codex", "sess-b", &sig_b).unwrap();
 
     let md_all = pack("all", None, 12_000);
-    assert!(md_all.contains("2×"), "global pack counts both repos: {md_all}");
+    assert!(
+        md_all.contains("2×"),
+        "global pack counts both repos: {md_all}"
+    );
 
     let md_a = pack("host/a", None, 12_000);
-    assert!(md_a.contains("1×"), "scoped pack counts only repo a: {md_a}");
+    assert!(
+        md_a.contains("1×"),
+        "scoped pack counts only repo a: {md_a}"
+    );
     assert!(!md_a.contains("host/b"), "other repo excluded when scoped");
 }
 
@@ -186,7 +195,10 @@ fn pack_surfaces_skipped_event_files() {
     let skipped = data["skipped"].as_array().expect("skipped is an array");
     assert_eq!(skipped.len(), 1);
     assert_eq!(skipped[0]["file"], "pc_01KGARBAGE00000000000009.json");
-    assert!(skipped[0]["reason"].as_str().unwrap().contains("parse error"));
+    assert!(skipped[0]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("parse error"));
 }
 
 /// Under a tight `--max-tokens` with quarantined event files present, the

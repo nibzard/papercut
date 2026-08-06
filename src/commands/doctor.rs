@@ -99,7 +99,11 @@ pub fn run() -> RunResult {
     let text = format_doctor(&checks, healthy);
     // Health routes the full checks payload through the success envelope while
     // still exiting 1 when anything failed.
-    RunResult::Health { data, text, healthy }
+    RunResult::Health {
+        data,
+        text,
+        healthy,
+    }
 }
 
 fn check_store() -> Check {
