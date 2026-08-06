@@ -355,13 +355,7 @@ impl Default for Sweeps {
 mod tests {
     use super::*;
     use crate::model::{EventContext, Source, Status};
-    use std::sync::{Mutex, OnceLock};
-
-    /// Serialize tests that mutate process-global env vars (XDG_DATA_HOME).
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    fn lock() -> &'static Mutex<()> {
-        ENV_LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use crate::test_env::EnvGuard;
 
     fn mk(id: &str) -> Event {
         Event {
@@ -380,13 +374,13 @@ mod tests {
     }
 
     /// Run `f` against a fresh, isolated store under a temp XDG_DATA_HOME.
+    /// The guard restores the prior HOME/XDG values even when `f` panics.
     fn with_store<F: FnOnce()>(f: F) {
-        let _g = lock().lock().unwrap();
+        let _g = EnvGuard::acquire(&["HOME", "XDG_DATA_HOME"]);
         let tmp = std::env::temp_dir().join(format!("pc-test-{}", crate::id::new_id()));
         std::fs::create_dir_all(&tmp).unwrap();
         std::env::set_var("XDG_DATA_HOME", &tmp);
         f();
-        std::env::remove_var("XDG_DATA_HOME");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

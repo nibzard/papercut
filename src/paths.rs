@@ -77,16 +77,11 @@ pub enum RepoScope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    // env vars are process-global; serialize tests that mutate them.
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    use crate::test_env::EnvGuard;
 
     #[test]
     fn data_root_none_when_home_and_xdg_unset() {
-        let _g = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let old_home = env::var_os("HOME");
-        let old_xdg = env::var_os("XDG_DATA_HOME");
+        let _g = EnvGuard::acquire(&["HOME", "XDG_DATA_HOME"]);
         env::remove_var("XDG_DATA_HOME");
         env::remove_var("HOME");
         assert!(
@@ -96,24 +91,13 @@ mod tests {
         // An empty value is treated as unset too.
         env::set_var("HOME", "");
         assert!(data_root().is_none());
-        // Restore.
-        match old_home {
-            Some(v) => env::set_var("HOME", v),
-            None => env::remove_var("HOME"),
-        }
-        match old_xdg {
-            Some(v) => env::set_var("XDG_DATA_HOME", v),
-            None => env::remove_var("XDG_DATA_HOME"),
-        }
     }
 
     /// A relative `XDG_DATA_HOME` must NOT be honored — the private store would
     /// resolve against the cwd and could land inside a git repo.
     #[test]
     fn relative_xdg_is_ignored() {
-        let _g = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let old_home = env::var_os("HOME");
-        let old_xdg = env::var_os("XDG_DATA_HOME");
+        let _g = EnvGuard::acquire(&["HOME", "XDG_DATA_HOME"]);
         env::set_var("HOME", "/tmp/papercut-abs-home");
         env::set_var("XDG_DATA_HOME", "relative/data");
         let root = data_root().expect("falls back to absolute HOME");
@@ -126,13 +110,5 @@ mod tests {
         env::set_var("HOME", "relative/home");
         env::remove_var("XDG_DATA_HOME");
         assert!(data_root().is_none(), "relative HOME yields no store");
-        match old_home {
-            Some(v) => env::set_var("HOME", v),
-            None => env::remove_var("HOME"),
-        }
-        match old_xdg {
-            Some(v) => env::set_var("XDG_DATA_HOME", v),
-            None => env::remove_var("XDG_DATA_HOME"),
-        }
     }
 }

@@ -2,8 +2,8 @@
 //!
 //! `std::env` is process-global, so every test that points the store or harness
 //! detection at a fake HOME/XDG must run serialized within a test binary. We
-//! hold a global mutex for the test's lifetime and point both vars at a unique
-//! temp tree, restoring (clearing) them on drop.
+//! hold a global mutex for the test's lifetime, point both vars at a unique
+//! temp tree, and restore their prior values on drop.
 //!
 //! This module is compiled into every integration test binary, only some of
 //! which use every helper — so unused items here are expected, not dead code.
@@ -23,12 +23,18 @@ fn env_lock() -> &'static Mutex<()> {
 pub struct IsolatedEnv {
     pub home: PathBuf,
     pub data: PathBuf,
+    saved_home: Option<std::ffi::OsString>,
+    saved_data: Option<std::ffi::OsString>,
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
 impl IsolatedEnv {
     pub fn new() -> Self {
-        let guard = env_lock().lock().unwrap();
+        // A poisoned lock is recovered: the panicking holder restored the env
+        // in its own drop, so the poison flag alone must not cascade failures.
+        let guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let saved_home = std::env::var_os("HOME");
+        let saved_data = std::env::var_os("XDG_DATA_HOME");
         let base = std::env::temp_dir().join(format!("pc-it-{}", papercut::id::new_id()));
         let home = base.join("home");
         let data = base.join("data");
@@ -40,6 +46,8 @@ impl IsolatedEnv {
         Self {
             home,
             data,
+            saved_home,
+            saved_data,
             _guard: guard,
         }
     }
@@ -65,8 +73,14 @@ impl Default for IsolatedEnv {
 
 impl Drop for IsolatedEnv {
     fn drop(&mut self) {
-        std::env::remove_var("XDG_DATA_HOME");
-        std::env::remove_var("HOME");
+        match &self.saved_data {
+            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+        match &self.saved_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
         if let Some(parent) = self.home.parent() {
             let _ = std::fs::remove_dir_all(parent);
         }

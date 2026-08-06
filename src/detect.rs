@@ -86,59 +86,50 @@ fn session_for(agent: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
+    use crate::test_env::EnvGuard;
 
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    fn lock() -> &'static Mutex<()> {
-        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    const DETECT_VARS: &[&str] = &[
+        "AI_AGENT",
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
+        "CODEX_HOME",
+        "CODEX_SESSION_ID",
+        "OPENCODE_CONFIG",
+    ];
+
+    /// Guard every detection var and start each test from a clean slate, so a
+    /// test run inside a real harness (which sets these vars) stays
+    /// deterministic.
+    fn clean_guard() -> EnvGuard {
+        let g = EnvGuard::acquire(DETECT_VARS);
+        for k in DETECT_VARS {
+            env::remove_var(k);
+        }
+        g
     }
 
     #[test]
     fn unknown_when_nothing_set() {
-        let _g = lock().lock().unwrap();
-        let keys = ["AI_AGENT", "CLAUDECODE", "CODEX_HOME", "OPENCODE_CONFIG"];
-        let saved: Vec<_> = keys.iter().map(|k| (k, env::var_os(k))).collect();
-        for k in keys {
-            env::remove_var(k);
-        }
+        let _g = clean_guard();
         let info = detect();
         assert_eq!(info.agent, "unknown");
-        for (k, v) in saved {
-            match v {
-                Some(v) => env::set_var(k, v),
-                None => env::remove_var(k),
-            }
-        }
     }
 
     #[test]
     fn detects_claude_code() {
-        let _g = lock().lock().unwrap();
+        let _g = clean_guard();
         env::set_var("CLAUDECODE", "1");
         env::set_var("CLAUDE_CODE_SESSION_ID", "sess-123");
         let info = detect();
         assert_eq!(info.agent, "claude-code");
         assert_eq!(info.session.as_deref(), Some("sess-123"));
-        env::remove_var("CLAUDECODE");
-        env::remove_var("CLAUDE_CODE_SESSION_ID");
     }
 
     #[test]
     fn parses_ai_agent_marker() {
-        let _g = lock().lock().unwrap();
-        let saved_ai = env::var_os("AI_AGENT");
-        let saved_claude = env::var_os("CLAUDECODE");
-        env::remove_var("CLAUDECODE");
+        let _g = clean_guard();
         env::set_var("AI_AGENT", "codex_0.105.0_x86");
         let info = detect();
         assert_eq!(info.agent, "codex");
-        match saved_ai {
-            Some(v) => env::set_var("AI_AGENT", v),
-            None => env::remove_var("AI_AGENT"),
-        }
-        match saved_claude {
-            Some(v) => env::set_var("CLAUDECODE", v),
-            None => env::remove_var("CLAUDECODE"),
-        }
     }
 }

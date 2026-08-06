@@ -19,6 +19,8 @@ pub mod projection;
 pub mod query;
 pub mod signal;
 pub mod store;
+#[cfg(test)]
+pub(crate) mod test_env;
 pub mod time;
 pub mod util;
 
