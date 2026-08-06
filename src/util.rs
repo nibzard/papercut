@@ -60,3 +60,118 @@ pub fn first_n_lines(s: &str, n: usize) -> String {
 pub fn cap_chars(s: &str, chars: usize) -> String {
     truncate(s, chars)
 }
+
+// ── markdown neutralization for free-text fields ───────────────────────────
+//
+// Event text (summaries, hypotheses, fixes, signal commands) is data, never
+// trusted structure. These helpers keep it from forging markdown: collapsing
+// it onto one line, indenting continuation lines off column 0, and fencing
+// code spans so backticks cannot break out. All deterministic.
+
+/// Collapse every whitespace run (including newlines) to a single space, so a
+/// free-text field rendered one row per event (e.g. `list`) can never forge
+/// extra rows from an embedded newline.
+pub fn md_single_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Prefix every line of `s` after the first with `indent`, so multiline free
+/// text rendered under a bullet or section can never start a line at column 0.
+/// A forged `## heading` or peer `- item` becomes an indented continuation that
+/// stays inside its containing element instead of structuring the document.
+/// CRLF/CR are normalized to `\n` first.
+pub fn md_indent_continuation(s: &str, indent: &str) -> String {
+    let norm = s.replace("\r\n", "\n").replace('\r', "\n");
+    let mut out = String::with_capacity(norm.len() + norm.matches('\n').count() * indent.len());
+    for (i, line) in norm.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+            out.push_str(indent);
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+/// Wrap `s` in a markdown code span using enough backticks to contain the
+/// longest backtick run in `s`, so a value containing backticks — a shell
+/// command like `` echo `whoami` `` — cannot break out of the span. With no
+/// backticks in `s` this is the ordinary single-backtick span, byte-identical
+/// to a hand-written `` `s` ``; with backticks the fence grows by one and is
+/// space-padded so a leading/trailing backtick cannot merge with it.
+pub fn md_code_span(s: &str) -> String {
+    let mut longest = 0usize;
+    let mut run = 0usize;
+    for b in s.bytes() {
+        if b == b'`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    if longest == 0 {
+        return format!("`{s}`");
+    }
+    let fence = "`".repeat(longest + 1);
+    format!("{fence} {s} {fence}")
+}
+
+#[cfg(test)]
+mod md_tests {
+    use super::*;
+
+    #[test]
+    fn single_line_collapses_newlines() {
+        assert_eq!(md_single_line("a\nb\t c"), "a b c");
+        assert_eq!(md_single_line("plain"), "plain");
+        assert_eq!(md_single_line("  \n "), "");
+    }
+
+    #[test]
+    fn indent_continuation_keeps_first_line_off_indent() {
+        assert_eq!(md_indent_continuation("a", "  "), "a");
+        assert_eq!(
+            md_indent_continuation("a\nb\nc", "  "),
+            "a\n  b\n  c",
+            "only continuation lines gain the indent"
+        );
+    }
+
+    #[test]
+    fn indent_continuation_defeats_a_forged_heading() {
+        let forged = "real\n## evil heading\n- fake peer";
+        let out = md_indent_continuation(forged, "  ");
+        // No emitted line starts at column 0 with the forged heading.
+        assert!(
+            !out.lines()
+                .any(|l| l.starts_with("## ") || l.starts_with("- ")),
+            "forged structure neutralized: {out}"
+        );
+        assert!(out.contains("real") && out.contains("evil heading"));
+    }
+
+    #[test]
+    fn code_span_plain_is_ordinary_single_backticks() {
+        // No backticks in input → single-backtick span (byte-identical to `` `x` ``).
+        assert_eq!(md_code_span("abc1234"), "`abc1234`");
+    }
+
+    #[test]
+    fn code_span_with_one_backtick_uses_two() {
+        // A command containing a single backtick run is fenced with two.
+        let span = md_code_span("echo `whoami`");
+        assert!(span.starts_with("`` "), "double-backtick fence: {span}");
+        assert!(span.ends_with(" ``"));
+        assert!(span.contains("echo `whoami`"));
+    }
+
+    #[test]
+    fn code_span_with_double_backtick_run_uses_three() {
+        let span = md_code_span("a``b");
+        assert!(
+            span.starts_with("``` "),
+            "triple fence for a double run: {span}"
+        );
+    }
+}

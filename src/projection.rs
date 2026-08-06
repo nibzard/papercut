@@ -5,7 +5,7 @@
 
 use crate::model::{Event, Status};
 use crate::paths::RepoScope;
-use crate::util::truncate;
+use crate::util::{md_code_span, md_indent_continuation, md_single_line, truncate};
 
 const SUMM_MAX: usize = 200;
 
@@ -17,7 +17,7 @@ pub fn render_markdown(scope: &RepoScope, events: &[Event]) -> String {
     let mut out = String::new();
     out.push_str("# Papercuts\n\n");
     match scope {
-        RepoScope::One(r) => out.push_str(&format!("repo: `{r}`\n\n")),
+        RepoScope::One(r) => out.push_str(&format!("repo: {}\n\n", md_code_span(r))),
         RepoScope::All => out.push_str("scope: global (all repos)\n\n"),
     }
 
@@ -54,32 +54,38 @@ pub fn render_markdown(scope: &RepoScope, events: &[Event]) -> String {
             out.push_str(&format!(
                 "- **{}** {}\n",
                 e.id,
-                truncate(&e.summary, SUMM_MAX)
+                md_indent_continuation(&truncate(&e.summary, SUMM_MAX), "  ")
             ));
             let mut bits: Vec<String> = Vec::new();
             if let Some(a) = &e.context.agent {
                 bits.push(format!("_{a}_"));
             }
             if let Some(c) = &e.context.cwd {
-                bits.push(format!("`{c}`"));
+                bits.push(md_code_span(c));
             }
             if let Some(s) = &e.context.git_sha {
-                bits.push(format!("`{s}`"));
+                bits.push(md_code_span(s));
             }
             if let Some(t) = &e.context.task {
-                bits.push(format!("task: {t}"));
+                bits.push(format!("task: {}", md_single_line(t)));
             }
             if !bits.is_empty() {
                 out.push_str(&format!("  - {}\n", bits.join(" · ")));
             }
             if let Some(h) = &e.hypothesis {
-                out.push_str(&format!("  - hypothesis: {}\n", truncate(h, SUMM_MAX)));
+                out.push_str(&format!(
+                    "  - hypothesis: {}\n",
+                    md_indent_continuation(&truncate(h, SUMM_MAX), "    ")
+                ));
             }
             if let Some(fx) = &e.suggested_fix {
-                out.push_str(&format!("  - fix: {}\n", truncate(fx, SUMM_MAX)));
+                out.push_str(&format!(
+                    "  - fix: {}\n",
+                    md_indent_continuation(&truncate(fx, SUMM_MAX), "    ")
+                ));
             }
             if let Some(cat) = &e.category {
-                out.push_str(&format!("  - category: {cat}\n"));
+                out.push_str(&format!("  - category: {}\n", md_single_line(cat)));
             }
             // Only terminal events project their resolution. A reopened papercut
             // (non-terminal) may keep a stale resolution in the model — that's
@@ -89,9 +95,10 @@ pub fn render_markdown(scope: &RepoScope, events: &[Event]) -> String {
             // consistent with it.
             if e.status.is_terminal() {
                 if let Some(res) = &e.resolution {
-                    let mut line = format!("  - resolved: {}", truncate(&res.reason, SUMM_MAX));
+                    let reason = md_indent_continuation(&truncate(&res.reason, SUMM_MAX), "    ");
+                    let mut line = format!("  - resolved: {reason}");
                     if let Some(rf) = &res.ref_ {
-                        line.push_str(&format!(" (`{rf}`)"));
+                        line.push_str(&format!(" ({})", md_code_span(rf)));
                     }
                     out.push_str(&line);
                     out.push('\n');
@@ -162,6 +169,43 @@ mod tests {
         });
         let md = render_markdown(&RepoScope::All, std::slice::from_ref(&e));
         assert!(md.contains("resolved: pinned dep (`abc1234`)"));
+    }
+
+    /// A multiline summary cannot forge a heading or a peer list item: every
+    /// continuation line is indented off column 0, so attacker-shaped text
+    /// stays a continuation of its own bullet instead of structuring the doc.
+    #[test]
+    fn multiline_summary_cannot_forge_structure() {
+        let mut e = ev("pc_01K000000000000000000000F", Status::Open, "real");
+        e.summary = "real\n## open (99)\n- fake peer event".into();
+        let md = render_markdown(&RepoScope::All, std::slice::from_ref(&e));
+        // No line begins at column 0 with the forged heading or item.
+        assert!(
+            !md.lines().any(|l| l.starts_with("## open (99)")),
+            "forged heading must not structure the doc: {md}"
+        );
+        assert!(
+            !md.lines().any(|l| l == "- fake peer event"),
+            "forged peer item must not appear at column 0: {md}"
+        );
+        assert!(md.contains("real"), "real summary text present");
+        assert!(
+            md.contains("fake peer"),
+            "forged text kept as data, indented"
+        );
+    }
+
+    /// A multiline hypothesis/fix is indented under its sub-bullet, never at
+    /// column 0.
+    #[test]
+    fn multiline_hypothesis_cannot_forge_structure() {
+        let mut e = ev("pc_01K000000000000000000000G", Status::Open, "ok");
+        e.hypothesis = Some("guess\n## evil".into());
+        let md = render_markdown(&RepoScope::All, std::slice::from_ref(&e));
+        assert!(
+            !md.lines().any(|l| l.starts_with("## evil")),
+            "forged heading from hypothesis blocked: {md}"
+        );
     }
 
     /// A reopened papercut (status flipped back to `open`) is allowed to keep its

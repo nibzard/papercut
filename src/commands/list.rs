@@ -4,7 +4,7 @@ use crate::app::RunResult;
 use crate::cli::ListArgs;
 use crate::paths::resolve_repo_filter;
 use crate::query::{current_repo, Filters};
-use crate::util::{truncate, SKIPPED_LIST_MAX, SKIPPED_REASON_MAX};
+use crate::util::{md_single_line, truncate, SKIPPED_LIST_MAX, SKIPPED_REASON_MAX};
 use serde_json::json;
 
 pub fn run(args: ListArgs) -> RunResult {
@@ -41,7 +41,7 @@ fn render_text(events: &[crate::model::Event], skipped: &[crate::store::SkippedF
             e.id,
             e.status.label(),
             truncate(repo, 40),
-            truncate(&e.summary, 72),
+            truncate(&md_single_line(&e.summary), 72),
         ));
     }
     append_skipped(&mut out, skipped);
@@ -118,5 +118,31 @@ mod tests {
         assert!(txt.contains("open"));
         assert!(txt.contains("github.com/foo/bar"));
         assert_eq!(txt.lines().count(), 1);
+    }
+
+    /// A multiline summary must not forge extra rows — `list` is one event per
+    /// line, so embedded newlines collapse onto the single row.
+    #[test]
+    fn multiline_summary_stays_one_line() {
+        let e = crate::model::Event {
+            schema_version: 1,
+            id: "pc_01K000000000000000000000B".into(),
+            created_at: "2026-08-04T20:42:00Z".into(),
+            source: Source::InMoment,
+            status: Status::Open,
+            summary: "first line\nsecond line".into(),
+            hypothesis: None,
+            suggested_fix: None,
+            category: None,
+            context: EventContext::default(),
+            resolution: None,
+        };
+        let txt = render_text(std::slice::from_ref(&e), &[]);
+        assert_eq!(
+            txt.lines().count(),
+            1,
+            "multiline summary collapses to one row: {txt}"
+        );
+        assert!(txt.contains("first line") && txt.contains("second line"));
     }
 }
