@@ -2,7 +2,7 @@
 
 use crate::app::RunResult;
 use crate::cli::InstallArgs;
-use crate::harness::{detect, DetectedHarness, HarnessTier};
+use crate::harness::{detect, filter_detected, DetectedHarness, HarnessTier};
 use crate::managed_block::{self, Action};
 use crate::output::ErrorItem;
 use crate::store::{self, AdapterState, InstalledHarness};
@@ -10,9 +10,9 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 pub fn run(args: InstallArgs) -> RunResult {
-    let _ = args.yes; // install never prompts; --yes is the explicit script flag.
+    let _ = args.yes; // clap requires the flag; install itself never prompts.
     let detected = detect();
-    let selected = filter_harnesses(detected, args.harness.as_deref());
+    let selected = filter_detected(detected, args.harness.as_deref());
 
     if selected.is_empty() {
         return RunResult::err(ErrorItem::new(
@@ -65,9 +65,11 @@ pub fn run(args: InstallArgs) -> RunResult {
             errs.push(format!("{}: mkdir {}: {e}", h.id, parent.display()));
             continue;
         }
-        if let Err(e) = std::fs::write(&h.instructions_file, new_content) {
+        // Atomic write: a racing reader (another install, or the harness
+        // itself) must never see a truncated instructions file.
+        if let Err(e) = store::write_atomic(&h.instructions_file, new_content.as_bytes()) {
             errs.push(format!(
-                "{}: write {}: {e}",
+                "{}: write {}: {e:#}",
                 h.id,
                 h.instructions_file.display()
             ));
@@ -146,31 +148,22 @@ fn wire(h: &DetectedHarness, exe: &str) -> (Option<AdapterState>, Option<String>
                 Err(e) => (None, Some(format!("{e}"))),
             }
         }
-        HarnessTier::Sweep => (
-            Some(AdapterState {
-                kind: "codex-sweep".into(),
-                detail: "rollout jsonl".into(),
-            }),
-            None,
-        ),
-        HarnessTier::None => (None, None),
-    }
-}
-
-fn filter_harnesses(detected: Vec<DetectedHarness>, filter: Option<&str>) -> Vec<DetectedHarness> {
-    match filter {
-        None => detected,
-        Some(list) => {
-            let want: Vec<&str> = list
-                .split(',')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .collect();
-            detected
-                .into_iter()
-                .filter(|d| want.iter().any(|w| *w == d.id))
-                .collect()
+        HarnessTier::Sweep => {
+            // Honest wiring claim: report whether the sessions dir actually
+            // exists yet, instead of asserting a state never verified.
+            let detail = match crate::adapters::codex::sessions_root() {
+                Some(root) if root.exists() => "rollout jsonl".to_string(),
+                _ => "rollout jsonl (no sessions dir yet)".to_string(),
+            };
+            (
+                Some(AdapterState {
+                    kind: "codex-sweep".into(),
+                    detail,
+                }),
+                None,
+            )
         }
+        HarnessTier::None => (None, None),
     }
 }
 

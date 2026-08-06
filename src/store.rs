@@ -33,14 +33,17 @@ pub fn ensure_store() -> anyhow::Result<()> {
 
 /// Write `bytes` to `final_path` atomically: temp file in the same directory,
 /// then rename. Rename is atomic on the same filesystem, so a process killed
-/// mid-write leaves no partial file. On failure the temp file is removed
-/// (best-effort) so it cannot accumulate.
+/// mid-write leaves no partial file and a concurrent reader sees either the
+/// old or the new content, never a torn one. The temp name carries the pid so
+/// concurrent writers (e.g. racing installs) never clobber each other's temp
+/// file. On failure the temp file is removed (best-effort) so it cannot
+/// accumulate.
 pub(crate) fn write_atomic(final_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let name = final_path
         .file_name()
         .and_then(|n| n.to_str())
         .context("atomic write target has no file name")?;
-    let tmp_path = final_path.with_file_name(format!("{name}.tmp"));
+    let tmp_path = final_path.with_file_name(format!("{name}.{}.tmp", std::process::id()));
     if let Err(e) = std::fs::write(&tmp_path, bytes) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(e).with_context(|| format!("write temp file {}", tmp_path.display()));

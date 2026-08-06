@@ -11,6 +11,7 @@ use crate::harness::detect;
 use crate::managed_block;
 use crate::store;
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 
 struct Check {
     name: String,
@@ -25,13 +26,14 @@ pub fn run() -> RunResult {
     // 1. Store exists and is writable.
     checks.push(check_store());
 
-    // 2. Agent detection works.
+    // 2. Agent detection — informational only: `unknown` is an acceptable
+    // outcome by design, so there is no failing state to gate on.
     let info = crate::detect::detect();
     checks.push(Check {
         name: "agent_detection".into(),
         ok: true,
         detail: format!(
-            "agent={} session={}",
+            "informational: agent={} session={}",
             info.agent,
             info.session.as_deref().unwrap_or("-")
         ),
@@ -39,46 +41,58 @@ pub fn run() -> RunResult {
     });
 
     // 3. Per-harness managed block + adapter wiring.
-    for h in detect() {
-        let content = std::fs::read_to_string(&h.instructions_file).unwrap_or_default();
-        let v = managed_block::detect_version(&content);
-        let ok = v == Some(managed_block::BLOCK_VERSION);
-        checks.push(Check {
-            name: format!("block:{}", h.id),
-            ok,
-            detail: format!("version {:?}", v),
-            hint: if ok {
-                String::new()
-            } else {
-                "run: papercut install".into()
-            },
-        });
+    let detected = detect();
+    for h in &detected {
+        checks.push(check_block(format!("block:{}", h.id), &h.instructions_file));
 
         if h.id == "claude-code" {
-            let s = crate::adapters::claude_code::hook_status();
-            let ok = s.present && s.exe_ok;
-            let detail = match (s.present, s.exe_ok) {
-                (true, true) => format!(
-                    "PostToolUseFailure Bash hook present (exe: {})",
-                    s.exe.as_deref().unwrap_or("?")
+            checks.push(check_claude_adapter());
+        }
+        if h.id == "codex" {
+            // Informational: an empty sessions dir is normal on a fresh
+            // Codex install, so absence is reported honestly, not failed.
+            let detail = match crate::adapters::codex::sessions_root() {
+                Some(root) if root.exists() => {
+                    format!("informational: sessions dir present ({})", root.display())
+                }
+                Some(root) => format!(
+                    "informational: sessions dir not found yet ({}); sweep warns until Codex records a session",
+                    root.display()
                 ),
-                (true, false) => format!(
-                    "hook points at missing or non-executable: {}",
-                    s.exe.as_deref().unwrap_or("?")
-                ),
-                (false, _) => "hook missing".into(),
+                None => "informational: no home dir".into(),
             };
             checks.push(Check {
-                name: "adapter:claude-code".into(),
-                ok,
+                name: "adapter:codex".into(),
+                ok: true,
                 detail,
-                hint: if ok {
-                    String::new()
-                } else if !s.present {
-                    "run: papercut install".into()
-                } else {
-                    "reinstall papercut, or fix the hook command path".into()
-                },
+                hint: String::new(),
+            });
+        }
+    }
+
+    // 4. Recorded install paths that detection no longer covers. A managed
+    // block orphaned at a previously recorded path (config-dir drift) is
+    // invisible to the per-harness checks above and would linger forever.
+    let cfg = store::read_config();
+    let detected_files: Vec<&PathBuf> = detected.iter().map(|h| &h.instructions_file).collect();
+    for entry in &cfg.installed {
+        let rec = PathBuf::from(&entry.instructions_file);
+        if detected_files.iter().any(|f| **f == rec) {
+            continue;
+        }
+        let has_block = std::fs::read_to_string(&rec)
+            .ok()
+            .and_then(|c| managed_block::detect_version(&c))
+            .is_some();
+        if has_block {
+            checks.push(Check {
+                name: format!("block:{}:recorded", entry.harness),
+                ok: false,
+                detail: format!("orphaned managed block at recorded path {}", rec.display()),
+                hint: format!(
+                    "run: papercut uninstall --harness {}, then papercut install --yes",
+                    entry.harness
+                ),
             });
         }
     }
@@ -103,6 +117,79 @@ pub fn run() -> RunResult {
         data,
         text,
         healthy,
+    }
+}
+
+/// Check one instructions file for the current managed block. An unreadable
+/// file gets its own diagnosis: hinting "run install" there would loop,
+/// because install refuses to modify a file it cannot read.
+fn check_block(name: String, path: &Path) -> Check {
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            let v = managed_block::detect_version(&content);
+            let ok = v == Some(managed_block::BLOCK_VERSION);
+            Check {
+                name,
+                ok,
+                detail: format!("version {v:?}"),
+                hint: if ok {
+                    String::new()
+                } else {
+                    "run: papercut install --yes".into()
+                },
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Check {
+            name,
+            ok: false,
+            detail: "instructions file missing".into(),
+            hint: "run: papercut install --yes".into(),
+        },
+        Err(e) => Check {
+            name,
+            ok: false,
+            detail: format!("cannot read {}: {e}", path.display()),
+            hint: "fix the file's permissions or encoding by hand; install refuses to modify a file it cannot read".into(),
+        },
+    }
+}
+
+/// Check the Claude Code hook wiring. A corrupt settings.json masks as "hook
+/// missing" through the lenient read path; diagnose the corruption instead
+/// of hinting at install, which refuses to touch an unparseable file.
+fn check_claude_adapter() -> Check {
+    if let Some(reason) = crate::adapters::claude_code::settings_diagnosis() {
+        return Check {
+            name: "adapter:claude-code".into(),
+            ok: false,
+            detail: reason,
+            hint: "back up and repair ~/.claude/settings.json by hand; install refuses to overwrite it".into(),
+        };
+    }
+    let s = crate::adapters::claude_code::hook_status();
+    let ok = s.present && s.exe_ok;
+    let detail = match (s.present, s.exe_ok) {
+        (true, true) => format!(
+            "PostToolUseFailure Bash hook present (exe: {})",
+            s.exe.as_deref().unwrap_or("?")
+        ),
+        (true, false) => format!(
+            "hook points at missing or non-executable: {}",
+            s.exe.as_deref().unwrap_or("?")
+        ),
+        (false, _) => "hook missing".into(),
+    };
+    Check {
+        name: "adapter:claude-code".into(),
+        ok,
+        detail,
+        hint: if ok {
+            String::new()
+        } else if !s.present {
+            "run: papercut install --yes".into()
+        } else {
+            "reinstall papercut, or fix the hook command path".into()
+        },
     }
 }
 

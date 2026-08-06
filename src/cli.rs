@@ -22,7 +22,7 @@ use crate::output::OutputMode;
                   $ papercut add 'flaky test' --task PROJ-42 --category tooling --output json\n\
                   $ papercut list --repo . --status open --since 7\n\
                   $ papercut render --write\n\
-                  $ papercut install\n\
+                  $ papercut install --yes\n\
                   $ papercut doctor\n\
                   $ papercut sweep\n\
                   $ papercut triage-pack --repo . --max-tokens 8000"
@@ -129,9 +129,10 @@ pub struct RenderArgs {
 
 #[derive(clap::Args)]
 pub struct InstallArgs {
-    /// Non-interactive confirmation. Install never prompts; this flag is the
-    /// explicit "go ahead" for scripts.
-    #[arg(long, default_value_t = true)]
+    /// Required confirmation: install modifies harness config files, and this
+    /// flag is the explicit go-ahead. Install never prompts — omitting the
+    /// flag is a usage error (exit 2), never a question.
+    #[arg(long, required = true)]
     pub yes: bool,
 
     /// Restrict to a comma-separated list of harness ids (e.g. `claude-code`).

@@ -143,6 +143,132 @@ fn count_our_entries(v: &Value) -> usize {
         .unwrap_or(0)
 }
 
+/// Concurrent installs race on read-modify-write and can double the block;
+/// the block engine owns every complete region, so the next pass converges
+/// to exactly one block with no leaked body text.
+#[test]
+fn concurrent_installs_converge_to_one_block() {
+    let env = IsolatedEnv::new().with_claude();
+    std::fs::write(env.home.join(".claude/CLAUDE.md"), "# user rules\n").unwrap();
+
+    let children: Vec<_> = (0..4)
+        .map(|_| {
+            std::process::Command::new(common::bin())
+                .args(["install", "--yes"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for mut c in children {
+        c.wait().unwrap();
+    }
+
+    // Whatever interleaving happened, one more install converges the file.
+    install(true, None);
+    let after = std::fs::read_to_string(env.home.join(".claude/CLAUDE.md")).unwrap();
+    assert_eq!(after.matches("papercut:begin").count(), 1);
+    assert_eq!(after.matches("### Log papercuts").count(), 1);
+    assert!(after.contains("# user rules"));
+
+    // And uninstall leaves no marker or body behind.
+    uninstall(None);
+    let clean = std::fs::read_to_string(env.home.join(".claude/CLAUDE.md")).unwrap();
+    assert!(!clean.contains("papercut"), "no residue: {clean}");
+    assert!(clean.contains("# user rules"));
+}
+
+/// A user hook whose command merely CONTAINS the substring `_hook
+/// claude-code` (e.g. an unrelated tool's `_hook claude-code-audit`) is not
+/// ours and must survive uninstall untouched.
+#[test]
+fn unrelated_hook_containing_substring_survives_uninstall() {
+    let env = IsolatedEnv::new().with_claude();
+    let settings = env.home.join(".claude/settings.json");
+    std::fs::write(
+        &settings,
+        r#"{"hooks":{"PostToolUseFailure":[{"matcher":"Bash","hooks":[{"type":"command","command":"/usr/local/bin/other-tool _hook claude-code-audit"}]}]}}"#,
+    )
+    .unwrap();
+
+    let removed = papercut::adapters::claude_code::uninstall_hook().unwrap();
+    assert_eq!(removed, 0, "the user's hook is not ours");
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(
+        v.pointer("/hooks/PostToolUseFailure/0/hooks/0/command")
+            .and_then(|c| c.as_str()),
+        Some("/usr/local/bin/other-tool _hook claude-code-audit"),
+        "user hook untouched"
+    );
+}
+
+/// An executable path containing spaces must produce a runnable (quoted)
+/// hook command, and doctor's exe check must resolve it.
+#[test]
+#[cfg(unix)]
+fn exe_path_with_spaces_is_quoted_and_resolvable() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = IsolatedEnv::new().with_claude();
+    let dir = env.home.join("bin with space");
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("papercut");
+    std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    papercut::adapters::claude_code::install_hook(&exe.to_string_lossy()).unwrap();
+
+    let status = papercut::adapters::claude_code::hook_status();
+    assert!(status.present);
+    assert_eq!(
+        status.exe.as_deref(),
+        Some(&*exe.to_string_lossy()),
+        "the exe token round-trips through quoting"
+    );
+    assert!(
+        status.exe_ok,
+        "a quoted exe path with spaces must resolve: {:?}",
+        status.exe
+    );
+
+    // The command in settings.json is shell-safe: the exe is one token.
+    let settings = env.home.join(".claude/settings.json");
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    let cmd = v
+        .pointer("/hooks/PostToolUseFailure/0/hooks/0/command")
+        .and_then(|c| c.as_str())
+        .unwrap();
+    assert!(
+        cmd.starts_with('\''),
+        "a path with spaces must be quoted: {cmd}"
+    );
+}
+
+/// Our entry drifted under a non-Bash matcher never fires for Bash — doctor
+/// must read it as missing, and a reinstall must move it back.
+#[test]
+fn matcher_drift_reads_as_missing_and_reinstall_heals() {
+    let env = IsolatedEnv::new().with_claude();
+    papercut::adapters::claude_code::install_hook("/x/papercut").unwrap();
+    assert!(papercut::adapters::claude_code::hook_present());
+
+    // Drift: another tool rewrites the group's matcher.
+    let settings = env.home.join(".claude/settings.json");
+    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    v["hooks"]["PostToolUseFailure"][0]["matcher"] = Value::String("Edit".into());
+    std::fs::write(&settings, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+
+    assert!(
+        !papercut::adapters::claude_code::hook_present(),
+        "an entry under a non-Bash matcher is a dead hook"
+    );
+
+    papercut::adapters::claude_code::install_hook("/x/papercut").unwrap();
+    assert!(papercut::adapters::claude_code::hook_present());
+    let v2: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(count_our_entries(&v2), 1, "moved back, not duplicated");
+}
+
 /// An install made by an older papercut wired PostToolUse, which never fires
 /// on failures. Doctor must read it as missing, and a reinstall must move the
 /// entry to PostToolUseFailure instead of leaving a dead duplicate behind.
@@ -218,7 +344,7 @@ fn doctor_flags_stale_block_version() {
         .iter()
         .find(|c| c["name"] == "block:claude-code")
         .unwrap();
-    assert_eq!(block_check["hint"], "run: papercut install");
+    assert_eq!(block_check["hint"], "run: papercut install --yes");
 }
 
 #[test]
@@ -272,6 +398,147 @@ fn doctor_flags_dead_hook_pointing_at_missing_exe() {
             .contains("missing or non-executable"),
         "detail must explain the dead exe: {}",
         adapter["detail"]
+    );
+}
+
+/// Install recorded `instructions_file` in config.json; when the harness's
+/// detected config path later drifts (OpenCode legacy → XDG), uninstall must
+/// still clean the RECORDED file instead of reporting "absent" and orphaning
+/// the block forever.
+#[test]
+fn uninstall_cleans_recorded_path_after_config_dir_drift() {
+    let env = IsolatedEnv::new();
+    std::fs::create_dir_all(env.home.join(".opencode")).unwrap();
+    install(true, Some("opencode"));
+    let legacy = env.home.join(".opencode/AGENTS.md");
+    assert!(std::fs::read_to_string(&legacy)
+        .unwrap()
+        .contains("papercut:begin"));
+
+    // The user later gains the XDG config dir; detection moves there.
+    std::fs::create_dir_all(env.home.join(".config/opencode")).unwrap();
+
+    uninstall(Some("opencode"));
+    assert!(
+        !std::fs::read_to_string(&legacy)
+            .unwrap()
+            .contains("papercut"),
+        "block removed from the recorded legacy path"
+    );
+    let cfg = papercut::store::read_config();
+    assert!(
+        cfg.installed.iter().all(|i| i.harness != "opencode"),
+        "config entry dropped once the recorded path is clean"
+    );
+}
+
+/// Doctor must surface a managed block orphaned at a previously recorded
+/// path the current detection no longer looks at.
+#[test]
+fn doctor_flags_orphaned_block_at_recorded_path() {
+    let env = IsolatedEnv::new();
+    std::fs::create_dir_all(env.home.join(".opencode")).unwrap();
+    install(true, Some("opencode"));
+    std::fs::create_dir_all(env.home.join(".config/opencode")).unwrap();
+
+    let data = doctor_data();
+    assert_eq!(data["healthy"], false);
+    let orphan = data["checks"].as_array().unwrap().iter().find(|c| {
+        c["name"]
+            .as_str()
+            .is_some_and(|n| n.contains("opencode") && n.contains("recorded"))
+    });
+    let orphan = orphan.expect("a recorded-path check exists");
+    assert_eq!(orphan["ok"], false);
+    assert!(
+        orphan["hint"].as_str().unwrap().contains("uninstall"),
+        "hint points at the command that can clean it: {}",
+        orphan["hint"]
+    );
+}
+
+/// An instructions file that EXISTS but cannot be read gets an honest
+/// diagnosis — not "block missing, run install" (install refuses exactly
+/// that file, so the old hint looped).
+#[test]
+fn doctor_diagnoses_unreadable_instructions_file() {
+    let env = IsolatedEnv::new().with_claude();
+    install(true, None);
+    std::fs::write(env.home.join(".claude/CLAUDE.md"), b"\xff\xfe broken \xff").unwrap();
+
+    let data = doctor_data();
+    assert_eq!(data["healthy"], false);
+    let block = data["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "block:claude-code")
+        .unwrap();
+    assert_eq!(block["ok"], false);
+    assert!(
+        block["detail"].as_str().unwrap().contains("cannot read"),
+        "diagnosis names the read failure: {}",
+        block["detail"]
+    );
+    assert!(
+        !block["hint"].as_str().unwrap().contains("papercut install"),
+        "hint must not loop into a command that refuses this file: {}",
+        block["hint"]
+    );
+}
+
+/// A corrupt settings.json reads as "hook missing" through the lenient path;
+/// doctor must diagnose the corruption instead of hinting at install, which
+/// refuses to touch an unparseable file.
+#[test]
+fn doctor_diagnoses_corrupt_settings_json() {
+    let env = IsolatedEnv::new().with_claude();
+    install(true, None);
+    std::fs::write(env.home.join(".claude/settings.json"), "{ not json {{{").unwrap();
+
+    let data = doctor_data();
+    assert_eq!(data["healthy"], false);
+    let adapter = data["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "adapter:claude-code")
+        .unwrap();
+    assert_eq!(adapter["ok"], false);
+    assert!(
+        adapter["detail"]
+            .as_str()
+            .unwrap()
+            .contains("not valid JSON"),
+        "diagnosis names the corruption: {}",
+        adapter["detail"]
+    );
+    assert!(
+        !adapter["hint"]
+            .as_str()
+            .unwrap()
+            .contains("papercut install"),
+        "hint must not loop into a command that refuses this file: {}",
+        adapter["hint"]
+    );
+}
+
+/// A user's pre-existing empty `"hooks": {}` key is the user's content, not
+/// ours — uninstall must leave it in place.
+#[test]
+fn user_empty_hooks_key_survives_uninstall() {
+    let env = IsolatedEnv::new().with_claude();
+    let settings = env.home.join(".claude/settings.json");
+    std::fs::write(&settings, r#"{"hooks":{},"model":"opus"}"#).unwrap();
+
+    papercut::adapters::claude_code::install_hook("/x/papercut").unwrap();
+    papercut::adapters::claude_code::uninstall_hook().unwrap();
+
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(v["model"], "opus");
+    assert!(
+        v.get("hooks").is_some_and(|h| h.as_object().is_some()),
+        "the user's hooks key survives uninstall: {v}"
     );
 }
 

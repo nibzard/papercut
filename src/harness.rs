@@ -129,3 +129,34 @@ pub fn detect() -> Vec<DetectedHarness> {
 pub fn find(id: &str) -> Option<HarnessDef> {
     catalog().into_iter().find(|d| d.id == id)
 }
+
+/// Restrict `detected` to the ids in a comma-separated `filter` (`None`
+/// selects everything). Shared by install and uninstall so the two commands
+/// can never drift apart on filter semantics.
+pub fn filter_detected(
+    detected: Vec<DetectedHarness>,
+    filter: Option<&str>,
+) -> Vec<DetectedHarness> {
+    match filter {
+        None => detected,
+        Some(list) => {
+            let want: Vec<&str> = list
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
+            detected
+                .into_iter()
+                .filter(|d| want.iter().any(|w| *w == d.id))
+                .collect()
+        }
+    }
+}
+
+/// Does `filter` select `id`? `None` selects everything.
+pub fn filter_selects(filter: Option<&str>, id: &str) -> bool {
+    match filter {
+        None => true,
+        Some(list) => list.split(',').map(str::trim).any(|w| w == id),
+    }
+}

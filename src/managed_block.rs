@@ -4,6 +4,11 @@
 //! Invariant: `install`/`uninstall` only ever touch the whole-line span
 //! between `<!-- papercut:begin v1 -->` and `<!-- papercut:end -->`. Content
 //! outside those markers is preserved byte-for-byte.
+//!
+//! Accepted limitation: inserting into a file whose last line has no trailing
+//! newline appends one (the block must start on its own line), and a later
+//! remove cannot restore the missing byte — the pre-install state is not
+//! recorded anywhere. This is the one deviation from byte-for-byte restore.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -95,23 +100,27 @@ fn line_spans(content: &str) -> Vec<(usize, usize)> {
     spans
 }
 
-/// Index into `markers` of the "primary" begin/end pair, if any: the first end
-/// marker paired with the last begin marker before it. This guarantees the span
-/// never crosses unrelated user content — a lone/orphan begin (no end before the
-/// next begin or EOF) yields no pair, so an upsert appends a fresh block instead
-/// of stretching a span to a distant end and swallowing content.
-fn primary_pair(markers: &[(usize, Marker)]) -> Option<(usize, usize)> {
-    for (mi, &(_, m)) in markers.iter().enumerate() {
-        if matches!(m, Marker::End) {
-            if let Some(bi) = markers[..mi]
-                .iter()
-                .rposition(|&(_, mm)| matches!(mm, Marker::Begin(_)))
-            {
-                return Some((bi, mi));
+/// Byte ranges of every COMPLETE begin..end block region, in file order. Each
+/// end marker pairs with the nearest unpaired begin before it, so a
+/// lone/orphan begin (no end following it) yields no region — an upsert then
+/// appends a fresh block instead of stretching a span to a distant end and
+/// swallowing user content. Multiple complete regions (e.g. two racing
+/// installs) are all reported, so upsert/remove own every duplicate — body
+/// text included — never just the first pair's.
+fn block_regions(spans: &[(usize, usize)], markers: &[(usize, Marker)]) -> Vec<(usize, usize)> {
+    let mut regions = Vec::new();
+    let mut pending: Option<usize> = None; // span index of the last unpaired begin
+    for &(si, m) in markers {
+        match m {
+            Marker::Begin(_) => pending = Some(si),
+            Marker::End => {
+                if let Some(b) = pending.take() {
+                    regions.push((spans[b].0, spans[si].1));
+                }
             }
         }
     }
-    None
+    regions
 }
 
 /// Collect `(span_index, Marker)` for every marker line in `content`.
@@ -135,16 +144,16 @@ pub fn detect_version(content: &str) -> Option<u32> {
     None
 }
 
-/// Upsert the current block into `content`. Idempotent. Stray/orphan marker
-/// lines (our leftovers) are removed; all non-marker content is preserved.
+/// Upsert the current block into `content`. Idempotent. The fresh block
+/// replaces the FIRST complete block region; every other complete region
+/// (a duplicate from e.g. racing installs) is removed whole — markers AND
+/// body. Stray/orphan marker lines (our leftovers) are removed; all
+/// non-region, non-marker content is preserved.
 pub fn upsert(content: &str) -> (String, Action) {
     let spans = line_spans(content);
     let markers = marker_lines(&spans, content);
+    let regions = block_regions(&spans, &markers);
     let desired = format!("{}\n", block_text());
-
-    let primary = primary_pair(&markers);
-    let begin_byte = primary.map(|(bi, _)| spans[markers[bi].0].0);
-    let end_byte_end = primary.map(|(_, ei)| spans[markers[ei].0].1);
 
     let mut out = String::with_capacity(content.len() + desired.len());
     let mut block_written = false;
@@ -157,10 +166,12 @@ pub fn upsert(content: &str) -> (String, Action) {
             skip_until = None;
         }
         let line = &content[s..e];
-        if Some(s) == begin_byte && !block_written {
-            out.push_str(&desired);
-            block_written = true;
-            skip_until = end_byte_end;
+        if let Some(&(_, rend)) = regions.iter().find(|&&(rs, _)| rs == s) {
+            skip_until = Some(rend);
+            if !block_written {
+                out.push_str(&desired);
+                block_written = true;
+            }
             continue;
         }
         if classify_marker(line).is_some() {
@@ -177,22 +188,21 @@ pub fn upsert(content: &str) -> (String, Action) {
 
     let action = if out == content {
         Action::Unchanged
-    } else if primary.is_some() {
-        Action::Updated
-    } else {
+    } else if regions.is_empty() {
         Action::Inserted
+    } else {
+        Action::Updated
     };
     (out, action)
 }
 
-/// Remove the managed block (and any stray marker lines) from `content`.
-/// Returns `(new_content, removed_anything)`. Never touches non-marker content.
+/// Remove every managed-block region (markers and body) and any stray marker
+/// lines from `content`. Returns `(new_content, removed_anything)`. Never
+/// touches non-region, non-marker content.
 pub fn remove(content: &str) -> (String, bool) {
     let spans = line_spans(content);
     let markers = marker_lines(&spans, content);
-    let primary = primary_pair(&markers);
-    let begin_byte = primary.map(|(bi, _)| spans[markers[bi].0].0);
-    let end_byte_end = primary.map(|(_, ei)| spans[markers[ei].0].1);
+    let regions = block_regions(&spans, &markers);
 
     let mut out = String::with_capacity(content.len());
     let mut removed = false;
@@ -205,8 +215,8 @@ pub fn remove(content: &str) -> (String, bool) {
             skip_until = None;
         }
         let line = &content[s..e];
-        if Some(s) == begin_byte {
-            skip_until = end_byte_end; // drop the whole old block region
+        if let Some(&(_, rend)) = regions.iter().find(|&&(rs, _)| rs == s) {
+            skip_until = Some(rend); // drop the whole block region
             removed = true;
             continue;
         }
@@ -342,6 +352,51 @@ mod tests {
         assert!(got.contains("BETWEEN"), "content between begins preserved");
         assert_eq!(got.matches("papercut:begin").count(), 1);
         assert_eq!(got.matches("papercut:end").count(), 1);
+    }
+
+    /// Two COMPLETE blocks (e.g. left behind by racing installs) collapse to
+    /// one, and the duplicate's body must not leak into the file as orphan
+    /// user text.
+    #[test]
+    fn duplicate_complete_blocks_collapse_without_leaking_body() {
+        let (one, _) = upsert("user line\n");
+        let doubled = format!("{one}{}\n", block_text());
+        assert_eq!(doubled.matches("papercut:begin").count(), 2);
+        let (got, action) = upsert(&doubled);
+        assert_ne!(action, Action::Unchanged);
+        assert_eq!(got.matches("papercut:begin").count(), 1);
+        assert_eq!(
+            got.matches("### Log papercuts").count(),
+            1,
+            "duplicate body removed, not leaked: {got}"
+        );
+        assert!(got.contains("user line"));
+    }
+
+    /// remove() on a doubled file leaves no marker AND no body text behind.
+    #[test]
+    fn remove_on_duplicate_blocks_leaves_no_body() {
+        let (one, _) = upsert("user line\n");
+        let doubled = format!("{one}{}\n", block_text());
+        let (got, removed) = remove(&doubled);
+        assert!(removed);
+        assert!(!got.contains("papercut"), "no marker or body left: {got}");
+        assert!(got.contains("user line"));
+    }
+
+    /// User content between two complete blocks survives both upsert and
+    /// remove — only the block regions themselves are owned by papercut.
+    #[test]
+    fn content_between_duplicate_blocks_is_preserved() {
+        let doubled = format!("{}\nBETWEEN BLOCKS\n{}\n", block_text(), block_text());
+        let (got, _) = upsert(&doubled);
+        assert!(got.contains("BETWEEN BLOCKS"));
+        assert_eq!(got.matches("papercut:begin").count(), 1);
+
+        let (gone, removed) = remove(&doubled);
+        assert!(removed);
+        assert!(gone.contains("BETWEEN BLOCKS"));
+        assert!(!gone.contains("papercut"));
     }
 
     /// The marker text embedded inside a line of user prose is not a marker.

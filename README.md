@@ -56,7 +56,7 @@ A single static Rust binary, boring crates only (`clap`, `serde`/`serde_json`, `
 
 ```
 cargo build -r                     # → target/release/papercut
-./target/release/papercut install  # detect harnesses, wire the managed block + adapters
+./target/release/papercut install --yes   # detect harnesses, wire the managed block + adapters
 ./target/release/papercut doctor   # verify store, blocks, and hook wiring
 ./target/release/papercut add -- "the shell ate my unquoted glob"
 ./target/release/papercut list --status open

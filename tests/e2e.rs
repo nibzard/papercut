@@ -34,8 +34,8 @@ fn run_in(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
 fn fresh_home_install_add_render() {
     let env = IsolatedEnv::new().with_claude();
 
-    // install wires the managed block + hook.
-    let (c, _, _) = run(&["install"]);
+    // install wires the managed block + hook; --yes is the required go-ahead.
+    let (c, _, _) = run(&["install", "--yes"]);
     assert_eq!(c, 0);
     let claude_md = std::fs::read_to_string(env.home.join(".claude/CLAUDE.md")).unwrap();
     assert!(claude_md.contains("papercut:begin v1"));
@@ -106,6 +106,16 @@ fn usage_error_is_exit_2() {
     // No required message argument.
     let (c, _out, _err) = run(&["add"]);
     assert_eq!(c, 2, "usage error must be exit 2");
+}
+
+/// `install` modifies N config files; the explicit go-ahead is required.
+/// Bare `papercut install` is a usage error, not a silent proceed.
+#[test]
+fn install_without_yes_is_usage_error() {
+    let _env = IsolatedEnv::new();
+    let (c, _out, err) = run(&["install"]);
+    assert_eq!(c, 2, "missing --yes must be a usage error");
+    assert!(err.contains("--yes"), "the error names the flag: {err}");
 }
 
 #[test]

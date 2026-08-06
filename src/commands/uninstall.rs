@@ -8,83 +8,107 @@
 
 use crate::app::RunResult;
 use crate::cli::UninstallArgs;
-use crate::harness::{detect, DetectedHarness};
+use crate::harness::{detect, filter_detected, filter_selects};
 use crate::managed_block;
 use crate::output::ErrorItem;
 use crate::store;
 use serde_json::{json, Value};
+use std::path::PathBuf;
+
+/// One harness to clean: every instructions file that may hold our block —
+/// the currently detected path plus any different path recorded in
+/// config.json (config-dir drift, or a harness no longer detected at all).
+struct Target {
+    id: String,
+    files: Vec<PathBuf>,
+}
 
 pub fn run(args: UninstallArgs) -> RunResult {
-    let detected = detect();
-    let selected = filter_harnesses(detected, args.harness.as_deref());
+    let filter = args.harness.as_deref();
+    let selected = filter_detected(detect(), filter);
 
     let mut results: Vec<Value> = Vec::new();
     let mut errs: Vec<String> = Vec::new();
     let mut cfg = store::read_config();
 
-    for h in &selected {
+    let mut targets: Vec<Target> = selected
+        .iter()
+        .map(|h| Target {
+            id: h.id.clone(),
+            files: vec![h.instructions_file.clone()],
+        })
+        .collect();
+    for entry in &cfg.installed {
+        if !filter_selects(filter, &entry.harness) {
+            continue;
+        }
+        let rec = PathBuf::from(&entry.instructions_file);
+        match targets.iter_mut().find(|t| t.id == entry.harness) {
+            Some(t) => {
+                if !t.files.contains(&rec) {
+                    t.files.push(rec);
+                }
+            }
+            None => targets.push(Target {
+                id: entry.harness.clone(),
+                files: vec![rec],
+            }),
+        }
+    }
+
+    for t in &targets {
         let mut removed_adapter = 0usize;
-        if h.id == "claude-code" {
+        if t.id == "claude-code" {
             match crate::adapters::claude_code::uninstall_hook() {
                 Ok(n) => removed_adapter = n,
-                Err(e) => errs.push(format!("{}: adapter: {e}", h.id)),
+                Err(e) => errs.push(format!("{}: adapter: {e}", t.id)),
             }
         }
 
-        // Read the instructions file. Missing = nothing to remove; any other
-        // read error (invalid UTF-8, permission denied, transient I/O) means we
-        // cannot safely inspect or rewrite it, so we refuse rather than feed ""
-        // to remove and report a misleading "nothing to uninstall".
-        let (new_content, removed_block) = match std::fs::read_to_string(&h.instructions_file) {
-            Ok(t) => managed_block::remove(&t),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), false),
-            Err(e) => {
-                errs.push(format!(
-                    "{}: read {}: {e}",
-                    h.id,
-                    h.instructions_file.display()
-                ));
-                // Block state unknown; keep the config entry and record nothing
-                // removed for this harness. Adapter removal above still stands.
-                results.push(json!({
-                    "harness": h.id,
-                    "block_removed": false,
-                    "adapter_removed": removed_adapter,
-                }));
-                continue;
-            }
-        };
-        // Reflect the actual on-disk outcome: a failed write means the block is
-        // still present, so report `false` and surface the error.
-        let block_persisted = if removed_block {
-            match std::fs::write(&h.instructions_file, &new_content) {
-                Ok(()) => true,
+        // Clean every file this harness may hold a block in. Missing files
+        // mean nothing to remove; any other read error (invalid UTF-8,
+        // permission denied) means we cannot safely inspect or rewrite the
+        // file, so we refuse rather than feed "" to remove and report a
+        // misleading "nothing to uninstall".
+        let mut any_removed = false;
+        // Every file verified block-free (removed and written, or had no
+        // block). A failed read or write leaves the block state dirty.
+        let mut clean = true;
+        for file in &t.files {
+            match std::fs::read_to_string(file) {
+                Ok(text) => {
+                    let (new_content, removed_block) = managed_block::remove(&text);
+                    if removed_block {
+                        // Reflect the actual on-disk outcome: a failed write
+                        // means the block is still present.
+                        match std::fs::write(file, &new_content) {
+                            Ok(()) => any_removed = true,
+                            Err(e) => {
+                                errs.push(format!("{}: write {}: {e}", t.id, file.display()));
+                                clean = false;
+                            }
+                        }
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
-                    errs.push(format!(
-                        "{}: write {}: {e}",
-                        h.id,
-                        h.instructions_file.display()
-                    ));
-                    false
+                    errs.push(format!("{}: read {}: {e}", t.id, file.display()));
+                    clean = false;
                 }
             }
-        } else {
-            false
-        };
+        }
 
         results.push(json!({
-            "harness": h.id,
-            "block_removed": block_persisted,
+            "harness": t.id,
+            "block_removed": any_removed,
             "adapter_removed": removed_adapter,
         }));
 
-        // Keep config consistent with disk: drop the entry only when the block
-        // is actually gone — written out, or absent to begin with. A failed
-        // write leaves the block on disk, so the entry must stay (otherwise a
-        // later `doctor`/`install` would misreport state).
-        let block_gone = !removed_block || block_persisted;
-        if block_gone {
-            cfg.installed.retain(|i| i.harness != h.id);
+        // Keep config consistent with disk: drop the entry only when every
+        // file is verified block-free. A failed read or write leaves the
+        // entry in place so a later `doctor`/`uninstall` still sees it.
+        if clean {
+            cfg.installed.retain(|i| i.harness != t.id);
         }
     }
 
@@ -113,19 +137,6 @@ pub fn run(args: UninstallArgs) -> RunResult {
         RunResult::Err {
             data: json!({ "uninstalled": results }),
             errors,
-        }
-    }
-}
-
-fn filter_harnesses(detected: Vec<DetectedHarness>, filter: Option<&str>) -> Vec<DetectedHarness> {
-    match filter {
-        None => detected,
-        Some(list) => {
-            let want: Vec<&str> = list.split(',').map(|s| s.trim()).collect();
-            detected
-                .into_iter()
-                .filter(|d| want.iter().any(|w| *w == d.id))
-                .collect()
         }
     }
 }

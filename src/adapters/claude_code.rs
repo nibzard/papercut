@@ -99,11 +99,25 @@ fn write_settings(v: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Recognize the exact command shape we emit (`<exe> _hook claude-code`).
-/// Matching the agent suffix avoids classifying an unrelated user hook that
-/// merely happens to contain the substrings "papercut" and "_hook".
+/// Recognize the exact command shape we emit (`<exe> _hook claude-code`):
+/// the command's trailing whitespace-split tokens are exactly `_hook` then
+/// `claude-code`. Token-anchored so an unrelated user hook whose command
+/// merely CONTAINS the substring (e.g. `other-tool _hook claude-code-audit`)
+/// is never classified — and never deleted — as ours.
 fn is_our_hook(cmd: &str) -> bool {
-    cmd.contains("_hook claude-code")
+    let mut toks = cmd.split_whitespace().rev();
+    toks.next() == Some("claude-code") && toks.next() == Some("_hook")
+}
+
+/// The hook command line for settings.json. The executable is single-quoted
+/// when it contains whitespace, so a path like `/Users/Jane Doe/bin/papercut`
+/// still invokes as one token.
+fn hook_command(exe: &str) -> String {
+    if exe.chars().any(char::is_whitespace) {
+        format!("'{}' _hook claude-code", exe.replace('\'', r"'\''"))
+    } else {
+        format!("{exe} _hook claude-code")
+    }
 }
 
 /// Remove our hook entries under `event`. Drops only groups papercut emptied
@@ -194,7 +208,7 @@ pub fn install_hook(exe: &str) -> anyhow::Result<bool> {
         .and_then(|a| a.as_array_mut())
         .with_context(|| format!("hooks.{HOOK_EVENT} is not an array"))?;
 
-    let our_entry = json!({ "type": "command", "command": format!("{exe} _hook claude-code") });
+    let our_entry = json!({ "type": "command", "command": hook_command(exe) });
     let bash_idx = ptu
         .iter()
         .position(|g| g.get("matcher").and_then(|m| m.as_str()) == Some("Bash"));
@@ -235,17 +249,24 @@ pub fn uninstall_hook() -> anyhow::Result<usize> {
     for ev in LEGACY_HOOK_EVENTS {
         removed += remove_our_entries(hooks, ev);
     }
-    if hooks.is_empty() {
-        settings
-            .as_object_mut()
-            .expect("settings object")
-            .remove("hooks");
-    }
+    // The `hooks` key itself is never deleted, even when empty: we cannot
+    // know whether install created it or the user already had `"hooks": {}`,
+    // and deleting a user's key would violate "touch only what is ours". An
+    // empty leftover object is harmless.
     // Nothing was removed → the document is unchanged; don't rewrite it.
     if removed > 0 {
         write_settings(&settings)?;
     }
     Ok(removed)
+}
+
+/// Diagnose the settings.json file for `doctor`: `None` when the file is
+/// absent, blank, or valid JSON; `Some(reason)` when it exists but cannot be
+/// read or parsed. The lenient read path masks corruption as "no settings",
+/// which would send doctor to a "run install" hint that install refuses to
+/// follow — this gives doctor the honest diagnosis instead.
+pub fn settings_diagnosis() -> Option<String> {
+    load_settings_for_write().err().map(|e| format!("{e:#}"))
 }
 
 /// Is our failure-hook entry present in settings.json (under [`HOOK_EVENT`])?
@@ -277,11 +298,15 @@ pub struct HookStatus {
 
 pub fn hook_status() -> HookStatus {
     let settings = read_settings();
+    // Only a group whose matcher is exactly "Bash" fires for Bash commands —
+    // our entry drifted under any other matcher is a dead hook and must not
+    // read as present.
     let cmd = settings
         .pointer(&format!("/hooks/{HOOK_EVENT}"))
         .and_then(|v| v.as_array())
         .and_then(|arr| {
             arr.iter()
+                .filter(|g| g.get("matcher").and_then(|m| m.as_str()) == Some("Bash"))
                 .flat_map(|g| {
                     g.get("hooks")
                         .and_then(|h| h.as_array())
@@ -312,15 +337,28 @@ pub fn hook_status() -> HookStatus {
     }
 }
 
-/// The executable token from a command string `<exe> _hook claude-code`,
-/// stripping surrounding quotes. `None` if the command has no token.
+/// The executable token from a command string `<exe> _hook claude-code`. A
+/// leading single- or double-quoted token (the shape [`hook_command`] emits
+/// for paths with spaces) is read to its closing quote; otherwise the token
+/// ends at the first whitespace. `None` if the command has no token.
 fn first_token(cmd: &str) -> Option<String> {
+    let cmd = cmd.trim_start();
+    for quote in ['\'', '"'] {
+        if let Some(rest) = cmd.strip_prefix(quote) {
+            let end = rest.find(quote)?;
+            let tok = &rest[..end];
+            return if tok.is_empty() {
+                None
+            } else {
+                Some(tok.to_string())
+            };
+        }
+    }
     let tok = cmd.split_whitespace().next()?;
-    let trimmed = tok.trim_matches(|c| c == '"' || c == '\'');
-    if trimmed.is_empty() {
+    if tok.is_empty() {
         None
     } else {
-        Some(trimmed.to_string())
+        Some(tok.to_string())
     }
 }
 
