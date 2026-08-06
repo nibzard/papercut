@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 /// How signals are captured for a harness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HarnessTier {
-    /// A live hook records failures in real time (e.g. Claude Code PostToolUse).
+    /// A live hook records failures in real time (e.g. Claude Code PostToolUseFailure).
     Live,
     /// No hook; `sweep` parses on-disk session logs (e.g. Codex rollout JSONL).
     Sweep,

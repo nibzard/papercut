@@ -102,14 +102,14 @@ const GIT_DEADLINE: Duration = Duration::from_millis(2000);
 /// `wait` would then hang past the deadline — re-introducing exactly the hang
 /// the ceiling exists to bound. The dropped child becomes a transient zombie
 /// reaped by init when the short-lived calling process exits; a zombie cannot
-/// stall the PostToolUse path. This is necessary because `git` reads config includes
+/// stall the hook path. This is necessary because `git` reads config includes
 /// eagerly on every command, so an `include.path` / `includeIf.*.path` (or
 /// `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_COUNT`/`_KEY`/`_VALUE`) pointing at a
 /// blocking local file — a FIFO held open by a stalled writer, a stalled NFS
 /// automount — can hang even `rev-parse`/`get-url` indefinitely, and that hang
 /// is neither a non-zero exit nor a spawn failure, so degrade-to-`None` alone
 /// does not cover it. This matters most on the hot hook path, which fires once
-/// per failed Bash command and must never stall the harness's PostToolUse. A
+/// per failed Bash command and must never stall the harness's hook dispatch. A
 /// correct std-only timeout needs no extra thread or crate, so none is added.
 ///
 /// Stdout is read only after the child exits, not drained concurrently (a

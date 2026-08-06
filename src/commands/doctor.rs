@@ -59,7 +59,7 @@ pub fn run() -> RunResult {
             let ok = s.present && s.exe_ok;
             let detail = match (s.present, s.exe_ok) {
                 (true, true) => format!(
-                    "PostToolUse Bash hook present (exe: {})",
+                    "PostToolUseFailure Bash hook present (exe: {})",
                     s.exe.as_deref().unwrap_or("?")
                 ),
                 (true, false) => format!(

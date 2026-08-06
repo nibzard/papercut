@@ -72,6 +72,25 @@ pub fn safe_segment(s: &str) -> bool {
     !s.is_empty() && !s.contains('/') && !s.contains('\\') && s != "." && s != ".."
 }
 
+/// Reduce a harness-supplied session id to a safe signal file name: keep only
+/// ASCII alphanumerics plus `.`, `_`, `-`; cap the length; fall back to
+/// "unknown" when nothing safe remains. Capture callers use this so a hostile
+/// or malformed session id costs the signal a pretty file name, never the
+/// signal itself. The signal's `session` FIELD keeps the original (bounded)
+/// value — only the file name is sanitized.
+pub fn filename_session(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .take(64)
+        .collect();
+    if safe_segment(&cleaned) {
+        cleaned
+    } else {
+        "unknown".to_string()
+    }
+}
+
 /// `~/.local/share/papercuts/signals/<harness>/`, or `None` if no home data dir
 /// is resolvable **or** the harness segment is unsafe. Returning `None` makes
 /// the hook path silently no-op rather than write outside the store.

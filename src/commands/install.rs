@@ -139,7 +139,7 @@ fn wire(h: &DetectedHarness, exe: &str) -> (Option<AdapterState>, Option<String>
                 Ok(_) => (
                     Some(AdapterState {
                         kind: "claude-code-hook".into(),
-                        detail: "PostToolUse Bash".into(),
+                        detail: "PostToolUseFailure Bash".into(),
                     }),
                     None,
                 ),

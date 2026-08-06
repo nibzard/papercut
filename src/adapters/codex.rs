@@ -332,7 +332,13 @@ fn sweep_file(
                                             Some(&head),
                                             Some(session_id.clone()),
                                         );
-                                        if append_signal(HARNESS, &session_id, &sig).is_ok() {
+                                        // The file name is sanitized so a
+                                        // hostile session id in a rollout
+                                        // cannot wedge the sweep in a
+                                        // permanent retry, nor escape the
+                                        // signals dir.
+                                        let file_id = crate::signal::filename_session(&session_id);
+                                        if append_signal(HARNESS, &file_id, &sig).is_ok() {
                                             emitted += 1;
                                         } else {
                                             // Persistence failed: restore the
@@ -411,12 +417,7 @@ fn extract_cmd(p: &Value) -> Option<String> {
 fn parse_exit(output: &str) -> Option<i32> {
     const NEEDLE: &str = "Process exited with code ";
     let idx = output.find(NEEDLE)?;
-    let rest = &output[idx + NEEDLE.len()..];
-    let num: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '-')
-        .collect();
-    num.parse::<i32>().ok()
+    crate::util::parse_leading_i32(&output[idx + NEEDLE.len()..])
 }
 
 fn extract_output_head(output: &str) -> String {

@@ -23,6 +23,16 @@ pub const SKIPPED_LIST_MAX: usize = 20;
 /// are not bounded at capture; this bounds them at projection time.
 pub const SKIPPED_REASON_MAX: usize = 160;
 
+/// Parse the ASCII integer at the start of `s` (a leading `-` is allowed).
+/// Used to read exit codes out of harness-formatted failure strings.
+pub fn parse_leading_i32(s: &str) -> Option<i32> {
+    let num: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '-')
+        .collect();
+    num.parse::<i32>().ok()
+}
+
 /// Truncate `s` to at most `max` characters on a UTF-8 boundary, appending an
 /// ellipsis when truncation occurs. Never panics on non-UTF-8 boundaries.
 pub fn truncate(s: &str, max: usize) -> String {

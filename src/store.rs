@@ -530,7 +530,7 @@ mod tests {
                 block_version: 1,
                 adapter: Some(AdapterState {
                     kind: "claude-code-hook".into(),
-                    detail: "PostToolUse Bash".into(),
+                    detail: "PostToolUseFailure Bash".into(),
                 }),
             });
             write_config(&cfg).unwrap();

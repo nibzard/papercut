@@ -84,38 +84,27 @@ fn settings_wiring_preserves_user_keys_and_is_idempotent() {
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
     assert_eq!(v["model"], "opus", "unrelated top-level key preserved");
 
-    let cmds: Vec<&str> = v["hooks"]["PostToolUse"][0]["hooks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|h| h["command"].as_str().unwrap())
-        .collect();
-    assert!(
-        cmds.iter().any(|c| c.contains("user-hook")),
-        "user hook kept"
+    // The user's PostToolUse hook is untouched; ours wires the failure event.
+    assert_eq!(
+        v.pointer("/hooks/PostToolUse/0/hooks/0/command")
+            .and_then(|c| c.as_str()),
+        Some("echo user-hook"),
+        "user hook kept where it was"
     );
+    let ours_cmd = v
+        .pointer("/hooks/PostToolUseFailure/0/hooks/0/command")
+        .and_then(|c| c.as_str())
+        .unwrap();
     assert!(
-        cmds.iter()
-            .any(|c| c.contains("papercut") && c.contains("_hook")),
-        "our hook added"
+        ours_cmd.contains("papercut") && ours_cmd.contains("_hook"),
+        "our hook added under PostToolUseFailure"
     );
     assert!(papercut::adapters::claude_code::hook_present());
 
-    // Idempotent: exactly one papercut entry across all groups.
+    // Idempotent: exactly one papercut entry across all events and groups.
     papercut::adapters::claude_code::install_hook("/x/papercut").unwrap();
     let v2: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
-    let ours = v2["hooks"]["PostToolUse"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|g| g["hooks"].as_array())
-        .flatten()
-        .filter(|h| {
-            h["command"]
-                .as_str()
-                .is_some_and(|c| c.contains("papercut") && c.contains("_hook"))
-        })
-        .count();
+    let ours = count_our_entries(&v2);
     assert_eq!(ours, 1, "no duplicate papercut entries");
 
     // Uninstall removes only ours; model + user hook remain.
@@ -123,17 +112,68 @@ fn settings_wiring_preserves_user_keys_and_is_idempotent() {
     assert_eq!(removed, 1);
     let v3: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
     assert_eq!(v3["model"], "opus");
-    let remaining: Vec<&str> = v3["hooks"]["PostToolUse"][0]["hooks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|h| h["command"].as_str().unwrap())
-        .collect();
-    assert!(remaining.iter().any(|c| c.contains("user-hook")));
-    assert!(remaining
-        .iter()
-        .all(|c| !(c.contains("papercut") && c.contains("_hook"))));
+    assert_eq!(
+        v3.pointer("/hooks/PostToolUse/0/hooks/0/command")
+            .and_then(|c| c.as_str()),
+        Some("echo user-hook"),
+        "user hook survives uninstall"
+    );
+    assert_eq!(count_our_entries(&v3), 0);
     assert!(!papercut::adapters::claude_code::hook_present());
+}
+
+/// Count papercut hook entries across every hook event and group.
+fn count_our_entries(v: &Value) -> usize {
+    v["hooks"]
+        .as_object()
+        .map(|events| {
+            events
+                .values()
+                .filter_map(|a| a.as_array())
+                .flatten()
+                .flat_map(|g| g["hooks"].as_array())
+                .flatten()
+                .filter(|h| {
+                    h["command"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("papercut") && c.contains("_hook"))
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// An install made by an older papercut wired PostToolUse, which never fires
+/// on failures. Doctor must read it as missing, and a reinstall must move the
+/// entry to PostToolUseFailure instead of leaving a dead duplicate behind.
+#[test]
+fn legacy_posttooluse_wiring_is_healed_on_reinstall() {
+    let env = IsolatedEnv::new().with_claude();
+    let settings = env.home.join(".claude/settings.json");
+    std::fs::write(
+        &settings,
+        r#"{"hooks":{"PostToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/x/papercut _hook claude-code"}]}]}}"#,
+    )
+    .unwrap();
+
+    assert!(
+        !papercut::adapters::claude_code::hook_present(),
+        "a PostToolUse-only wiring is a dead hook, not present"
+    );
+
+    papercut::adapters::claude_code::install_hook("/x/papercut").unwrap();
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(count_our_entries(&v), 1, "moved, not duplicated");
+    assert!(
+        v.pointer("/hooks/PostToolUseFailure/0/hooks/0/command")
+            .is_some(),
+        "entry now lives under PostToolUseFailure"
+    );
+    assert!(
+        v.pointer("/hooks/PostToolUse").is_none(),
+        "the legacy event key we emptied is gone"
+    );
+    assert!(papercut::adapters::claude_code::hook_present());
 }
 
 #[test]
@@ -204,7 +244,7 @@ fn doctor_flags_dead_hook_pointing_at_missing_exe() {
     // would wrongly report healthy.
     let settings = env.home.join(".claude/settings.json");
     let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
-    for g in v["hooks"]["PostToolUse"].as_array_mut().unwrap() {
+    for g in v["hooks"]["PostToolUseFailure"].as_array_mut().unwrap() {
         for h in g["hooks"].as_array_mut().unwrap() {
             if h["command"]
                 .as_str()
@@ -363,7 +403,7 @@ fn install_hook_accepts_blank_settings_file() {
             .unwrap_or_else(|e| panic!("blank settings must not block install: {e}"));
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
         assert!(
-            v["hooks"]["PostToolUse"]
+            v["hooks"]["PostToolUseFailure"]
                 .pointer("/0/hooks/0/command")
                 .is_some(),
             "our hook wired over a blank settings file: {v}"
@@ -391,7 +431,8 @@ fn install_hook_accepts_bom_prefixed_settings() {
         .unwrap_or_else(|e| panic!("BOM-only settings must not block install: {e}"));
     let v: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
     assert!(
-        v.pointer("/hooks/PostToolUse/0/hooks/0/command").is_some(),
+        v.pointer("/hooks/PostToolUseFailure/0/hooks/0/command")
+            .is_some(),
         "our hook wired over a BOM-only file: {v}"
     );
 
@@ -403,7 +444,9 @@ fn install_hook_accepts_bom_prefixed_settings() {
         .unwrap_or_else(|e| panic!("BOM-prefixed JSON must parse, not be refused: {e}"));
     let v2: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
     assert_eq!(v2["model"], "opus", "user key preserved past BOM strip");
-    assert!(v2.pointer("/hooks/PostToolUse/0/hooks/0/command").is_some());
+    assert!(v2
+        .pointer("/hooks/PostToolUseFailure/0/hooks/0/command")
+        .is_some());
 }
 
 /// A user-owned empty PostToolUse group (a placeholder for another matcher) must
@@ -421,32 +464,29 @@ fn empty_user_posttooluse_group_is_preserved() {
 
     papercut::adapters::claude_code::install_hook("/x/papercut").unwrap();
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
-    let matchers: Vec<&str> = v["hooks"]["PostToolUse"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|g| g["matcher"].as_str().unwrap())
-        .collect();
+    assert_eq!(
+        v.pointer("/hooks/PostToolUse/0/matcher")
+            .and_then(|m| m.as_str()),
+        Some("Edit"),
+        "user's empty Edit group preserved on install: {v}"
+    );
     assert!(
-        matchers.contains(&"Edit"),
-        "user's empty Edit group preserved on install: {matchers:?}"
+        v.pointer("/hooks/PostToolUseFailure/0/hooks/0/command")
+            .is_some(),
+        "our hook wired under the failure event"
     );
 
     // Uninstall removes only our (Bash) group; the empty Edit group stays.
     papercut::adapters::claude_code::uninstall_hook().unwrap();
     let v2: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
-    let matchers2: Vec<&str> = v2["hooks"]["PostToolUse"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|g| g["matcher"].as_str().unwrap())
-        .collect();
-    assert!(
-        matchers2.contains(&"Edit"),
-        "user's empty Edit group survives uninstall: {matchers2:?}"
+    assert_eq!(
+        v2.pointer("/hooks/PostToolUse/0/matcher")
+            .and_then(|m| m.as_str()),
+        Some("Edit"),
+        "user's empty Edit group survives uninstall: {v2}"
     );
     assert!(
-        !matchers2.contains(&"Bash"),
-        "our Bash group (emptied by removing our hook) is dropped"
+        v2.pointer("/hooks/PostToolUseFailure").is_none(),
+        "our event key (emptied by removing our hook) is dropped"
     );
 }

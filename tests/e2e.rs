@@ -125,11 +125,16 @@ fn json_envelope_shape_on_error() {
 #[test]
 fn hook_is_silent_and_exits_zero_regardless_of_input() {
     let _env = IsolatedEnv::new();
+    // The verified PostToolUseFailure payload shape (Claude Code v2.1.223,
+    // captured 2026-08-06).
     let payload = serde_json::json!({
-        "tool_name": "Bash",
-        "tool_input": {"command": "false"},
-        "tool_result": {"exit_code": 1, "output": "nope"},
         "session_id": "abc",
+        "cwd": "/proj",
+        "hook_event_name": "PostToolUseFailure",
+        "tool_name": "Bash",
+        "tool_input": {"command": "false", "description": "test"},
+        "error": "Exit code 1\nnope",
+        "is_interrupt": false,
     });
     let mut cmd = Command::new(common::bin());
     cmd.args(["_hook", "claude-code"])
@@ -147,6 +152,7 @@ fn hook_is_silent_and_exits_zero_regardless_of_input() {
     let out = child.wait_with_output().unwrap();
     assert_eq!(out.status.code(), Some(0));
     assert!(out.stdout.is_empty(), "hook must not print to stdout");
+    assert!(out.stderr.is_empty(), "hook must not print to stderr");
 
     // garbage stdin → still silent and 0
     let mut cmd = Command::new(common::bin());

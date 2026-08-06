@@ -1,19 +1,32 @@
 //! Claude Code signal adapter.
 //!
-//! Verified live (2026-08-04): Claude Code's `PostToolUse` hook receives a JSON
-//! payload on stdin with `tool_name`, `tool_input.command`, `tool_result.exit_code`,
-//! `tool_result.output`, `session_id`, and `cwd`. Hook failures are non-blocking
-//! by design, which already serves the "never fail the parent task" invariant;
-//! we additionally swallow every error inside the hook.
+//! Verified live (2026-08-06, Claude Code v2.1.223): a FAILED Bash command
+//! fires the `PostToolUseFailure` hook with a JSON payload on stdin carrying
+//! `tool_name`, `tool_input.command`, `session_id`, `cwd`, a top-level `error`
+//! string (`"Exit code N\n<combined output>"`), and an `is_interrupt` bool.
+//! `PostToolUse` fires only on SUCCESS, with a `tool_response` object
+//! (`{stdout, stderr, interrupted, …}`) and no exit information — so only
+//! `PostToolUseFailure` is wired; wiring `PostToolUse` would spawn the hook on
+//! every successful command for zero signal. Hook failures are non-blocking by
+//! design, which already serves the "never fail the parent task" invariant; we
+//! additionally swallow every error inside the hook. Re-verify these shapes
+//! against the installed harness on updates — never trust memory or docs.
 //!
 //! The settings.json wiring is the JSON analog of a managed block: we touch
-//! only `hooks.PostToolUse` entries whose `command` is ours, preserving every
-//! other key the user has.
+//! only hook entries whose `command` is ours, preserving every other key the
+//! user has.
 
 use crate::paths::home_dir;
 use anyhow::Context;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+
+/// The hook event that carries Bash failures.
+pub const HOOK_EVENT: &str = "PostToolUseFailure";
+/// Event keys an older papercut install may hold our entry under. Removal
+/// scans these too, so a rerun of `install` (or an `uninstall`) heals a
+/// pre-PostToolUseFailure wiring instead of leaving a dead entry behind.
+const LEGACY_HOOK_EVENTS: &[&str] = &["PostToolUse"];
 
 /// `~/.claude/settings.json`.
 pub fn settings_path() -> Option<PathBuf> {
@@ -93,7 +106,42 @@ fn is_our_hook(cmd: &str) -> bool {
     cmd.contains("_hook claude-code")
 }
 
-/// Idempotently install the PostToolUse Bash hook. Returns true if present.
+/// Remove our hook entries under `event`. Drops only groups papercut emptied
+/// by that removal; a group that was already empty (a user placeholder) or
+/// that still holds other hooks is left untouched. Removes the `event` key
+/// itself only when our removal emptied it. Returns the count removed.
+fn remove_our_entries(hooks: &mut serde_json::Map<String, Value>, event: &str) -> usize {
+    let mut removed = 0usize;
+    if let Some(arr) = hooks.get_mut(event).and_then(|a| a.as_array_mut()) {
+        let mut drop_idx: Vec<usize> = Vec::new();
+        for (gi, group) in arr.iter_mut().enumerate() {
+            if let Some(hs) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                let before = hs.len();
+                hs.retain(|h| {
+                    h.get("command")
+                        .and_then(|c| c.as_str())
+                        .is_none_or(|c| !is_our_hook(c))
+                });
+                let removed_here = before - hs.len();
+                removed += removed_here;
+                if removed_here > 0 && hs.is_empty() {
+                    drop_idx.push(gi);
+                }
+            }
+        }
+        for gi in drop_idx.into_iter().rev() {
+            arr.remove(gi);
+        }
+        if arr.is_empty() && removed > 0 {
+            hooks.remove(event);
+        }
+    }
+    removed
+}
+
+/// Idempotently install the failure hook (see [`HOOK_EVENT`]). Returns true if
+/// present. A rerun also strips our entry from legacy event keys, healing an
+/// install made by an older papercut.
 pub fn install_hook(exe: &str) -> anyhow::Result<bool> {
     let path = settings_path().context("no HOME; cannot locate claude settings")?;
     // Original bytes for the byte-identical skip (None when absent). Read errors
@@ -130,28 +178,21 @@ pub fn install_hook(exe: &str) -> anyhow::Result<bool> {
         .get_mut("hooks")
         .and_then(|h| h.as_object_mut())
         .context("settings.hooks is not an object")?;
-    if !hooks.contains_key("PostToolUse") {
-        hooks.insert("PostToolUse".into(), json!([]));
+
+    // Remove our existing entries everywhere first (idempotent), including
+    // legacy event keys from older installs.
+    remove_our_entries(hooks, HOOK_EVENT);
+    for ev in LEGACY_HOOK_EVENTS {
+        remove_our_entries(hooks, ev);
+    }
+
+    if !hooks.contains_key(HOOK_EVENT) {
+        hooks.insert(HOOK_EVENT.into(), json!([]));
     }
     let ptu = hooks
-        .get_mut("PostToolUse")
+        .get_mut(HOOK_EVENT)
         .and_then(|a| a.as_array_mut())
-        .context("hooks.PostToolUse is not an array")?;
-
-    // Remove our existing hook entries from every group (idempotent). We do NOT
-    // prune empty groups here: install only adds, and deleting a user-owned
-    // empty-placeholder group would violate "we touch only entries whose command
-    // is ours". A group emptied by this dedup either gets our hook re-added (the
-    // Bash group) or is a harmless empty no-op left in place.
-    for group in ptu.iter_mut() {
-        if let Some(arr) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
-            arr.retain(|h| {
-                h.get("command")
-                    .and_then(|c| c.as_str())
-                    .is_none_or(|c| !is_our_hook(c))
-            });
-        }
-    }
+        .with_context(|| format!("hooks.{HOOK_EVENT} is not an array"))?;
 
     let our_entry = json!({ "type": "command", "command": format!("{exe} _hook claude-code") });
     let bash_idx = ptu
@@ -178,7 +219,8 @@ pub fn install_hook(exe: &str) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// Remove our hook entries. Returns the count removed. Idempotent.
+/// Remove our hook entries from the failure event and every legacy event key.
+/// Returns the count removed. Idempotent.
 pub fn uninstall_hook() -> anyhow::Result<usize> {
     let mut settings = load_settings_for_write()?;
     let mut removed = 0usize;
@@ -189,32 +231,9 @@ pub fn uninstall_hook() -> anyhow::Result<usize> {
     else {
         return Ok(0);
     };
-    if let Some(ptu) = hooks.get_mut("PostToolUse").and_then(|a| a.as_array_mut()) {
-        // Drop only groups papercut emptied by removing its own hook. A group
-        // that was already empty (a user placeholder) or that still holds other
-        // hooks is left untouched — we touch only entries whose command is ours.
-        let mut drop_idx: Vec<usize> = Vec::new();
-        for (gi, group) in ptu.iter_mut().enumerate() {
-            if let Some(arr) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
-                let before = arr.len();
-                arr.retain(|h| {
-                    h.get("command")
-                        .and_then(|c| c.as_str())
-                        .is_none_or(|c| !is_our_hook(c))
-                });
-                let removed_here = before - arr.len();
-                removed += removed_here;
-                if removed_here > 0 && arr.is_empty() {
-                    drop_idx.push(gi);
-                }
-            }
-        }
-        for gi in drop_idx.into_iter().rev() {
-            ptu.remove(gi);
-        }
-        if ptu.is_empty() {
-            hooks.remove("PostToolUse");
-        }
+    removed += remove_our_entries(hooks, HOOK_EVENT);
+    for ev in LEGACY_HOOK_EVENTS {
+        removed += remove_our_entries(hooks, ev);
     }
     if hooks.is_empty() {
         settings
@@ -229,10 +248,11 @@ pub fn uninstall_hook() -> anyhow::Result<usize> {
     Ok(removed)
 }
 
-/// Is our PostToolUse Bash hook entry present in settings.json? This checks
-/// only that the command string is wired in — not that the executable it names
-/// actually exists. Use this to assert settings.json manipulation (install /
-/// uninstall idempotence); use [`hook_wired`] for the full health notion.
+/// Is our failure-hook entry present in settings.json (under [`HOOK_EVENT`])?
+/// This checks only that the command string is wired in — not that the
+/// executable it names actually exists. Use this to assert settings.json
+/// manipulation (install / uninstall idempotence); use [`hook_wired`] for the
+/// full health notion.
 pub fn hook_present() -> bool {
     hook_status().present
 }
@@ -258,7 +278,7 @@ pub struct HookStatus {
 pub fn hook_status() -> HookStatus {
     let settings = read_settings();
     let cmd = settings
-        .pointer("/hooks/PostToolUse")
+        .pointer(&format!("/hooks/{HOOK_EVENT}"))
         .and_then(|v| v.as_array())
         .and_then(|arr| {
             arr.iter()
