@@ -125,9 +125,19 @@ pub fn session_file(harness: &str, session: &str) -> Option<PathBuf> {
 /// Every caller (hook adapter, sweep) discards the error anyway — a broken
 /// signal sink must never surface in the parent task.
 pub fn append_signal(harness: &str, session: &str, signal: &Signal) -> anyhow::Result<()> {
-    let dir = signals_dir(harness).context("no home data dir: set $HOME or $XDG_DATA_HOME")?;
-    std::fs::create_dir_all(&dir).context("create signals dir")?;
+    // Validate BOTH segments before touching the filesystem: an unsafe session
+    // must degrade to an error WITHOUT a directory-creation side effect, which
+    // would otherwise mkdir the signals/<harness> subtree (in the real store
+    // when a test forgets to isolate) even though the signal is then rejected.
     let path = session_file(harness, session).context("unsafe or unresolvable signal path")?;
+    let dir = signals_dir(harness).context("no home data dir: set $HOME or $XDG_DATA_HOME")?;
+    // 0700, like the rest of the private store: the signal log carries failed
+    // command lines and a bounded stderr head, which can include leaked env or
+    // secret values, so the subtree must be owner-only — not merely
+    // private-by-location. `create_private_dir` is recursive, so the first hook
+    // to fire creates data_root/signals/<harness> (and any missing parents) all
+    // at 0700, even when no `install`/`add`/`sweep` has run `ensure_store` first.
+    crate::store::create_private_dir(&dir).context("create signals dir")?;
     let mut line = serde_json::to_string(signal).context("serialize signal")?;
     line.push('\n');
     // O_APPEND: the kernel advances the offset and writes atomically, so two
@@ -254,5 +264,71 @@ mod tests {
         let s = Signal::new("t", None, None, None, "cmd", 1, None, None);
         assert!(append_signal("../../etc", "sess", &s).is_err());
         assert!(append_signal("ok", "../pwn", &s).is_err());
+    }
+
+    /// Removes its temp tree on drop (even on panic), mirroring `store::with_store`.
+    struct TmpGuard(std::path::PathBuf);
+    impl Drop for TmpGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn isolated() -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!("pc-sig-{}", crate::id::new_id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("XDG_DATA_HOME", &tmp);
+        tmp
+    }
+
+    /// `append_signal` must create the `signals/<harness>` subtree owner-only
+    /// (0700): the signal log carries failed command lines and a bounded stderr
+    /// head, which can include leaked env or secret values, so it is private by
+    /// PERMISSION, not merely private by location.
+    #[test]
+    fn append_signal_creates_owner_only_signals_dir() {
+        let _g = crate::test_env::EnvGuard::acquire(&["HOME", "XDG_DATA_HOME"]);
+        let tmp = isolated();
+        let _cleanup = TmpGuard(tmp);
+
+        let s = Signal::new("t", None, None, None, "cmd", 1, None, None);
+        append_signal("ok", "sess", &s).expect("a safe signal appends");
+
+        let dir = signals_dir("ok").expect("safe harness resolves");
+        assert!(dir.exists(), "signals/ok created");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o700,
+                "signals dir must be owner-only (0700), got {:o}",
+                mode
+            );
+        }
+        let (sigs, _) = read_signals("ok");
+        assert_eq!(sigs.len(), 1, "the signal landed");
+    }
+
+    /// An unsafe session segment must degrade to an error WITHOUT creating the
+    /// `signals/<harness>` subtree as a side effect. Before the validate-before-
+    /// mkdir ordering, a real-store test that forgot to isolate could mkdir the
+    /// harness dir even though the signal was then rejected.
+    #[test]
+    fn unsafe_session_errors_without_creating_dirs() {
+        let _g = crate::test_env::EnvGuard::acquire(&["HOME", "XDG_DATA_HOME"]);
+        let tmp = isolated();
+        let _cleanup = TmpGuard(tmp);
+
+        let s = Signal::new("t", None, None, None, "cmd", 1, None, None);
+        let res = append_signal("ok", "../pwn", &s);
+        assert!(res.is_err(), "an unsafe session segment must error");
+        assert!(
+            signals_dir("ok").map(|d| !d.exists()).unwrap_or(true),
+            "unsafe session must not mkdir signals/ok"
+        );
+        let (sigs, _) = read_signals("ok");
+        assert!(sigs.is_empty(), "nothing was written");
     }
 }

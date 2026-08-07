@@ -108,6 +108,25 @@ fn usage_error_is_exit_2() {
     assert_eq!(c, 2, "usage error must be exit 2");
 }
 
+/// `--help` is part of the documented contract: it exits 0 (not clap's 2) and
+/// carries the exit-code table and EXAMPLES, so an agent introspecting usage
+/// learns the real command surface and the JSON envelope.
+#[test]
+fn help_exits_zero_with_contract_text() {
+    let _env = IsolatedEnv::new();
+    let (c, out, _err) = run(&["--help"]);
+    assert_eq!(c, 0, "--help must exit 0");
+    assert!(
+        out.contains("Exit codes"),
+        "help documents exit codes: {out}"
+    );
+    assert!(out.contains("EXAMPLES"), "help lists examples: {out}");
+    assert!(
+        out.contains("--output json"),
+        "help documents the json envelope: {out}"
+    );
+}
+
 /// `install` modifies N config files; the explicit go-ahead is required.
 /// Bare `papercut install` is a usage error, not a silent proceed.
 #[test]

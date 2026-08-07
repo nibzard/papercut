@@ -53,7 +53,7 @@ pub fn render_markdown(scope: &RepoScope, events: &[Event]) -> String {
         for e in group {
             out.push_str(&format!(
                 "- **{}** {}\n",
-                e.id,
+                md_single_line(&e.id),
                 md_indent_continuation(&truncate(&e.summary, SUMM_MAX), "  ")
             ));
             let mut bits: Vec<String> = Vec::new();

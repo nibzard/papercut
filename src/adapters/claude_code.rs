@@ -95,7 +95,14 @@ fn write_settings(v: &Value) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent).context("create ~/.claude")?;
     }
     let bytes = serde_json::to_vec_pretty(v).context("serialize settings")?;
-    std::fs::write(&path, bytes).context("write settings.json")?;
+    // Atomic (temp + rename): settings.json is the one file papercut does NOT
+    // own — Claude Code reads it on every launch. A torn in-place write would
+    // corrupt the user's entire harness config (every hook and permission), and
+    // the strict load path above then refuses to overwrite the unparseable
+    // result, so papercut could not self-heal its own torn write. Rename is
+    // atomic on the same filesystem, matching every other persistence path
+    // (events / config / sweeps / instructions / render --write).
+    crate::store::write_atomic(&path, &bytes).context("write settings.json")?;
     Ok(())
 }
 
@@ -109,15 +116,17 @@ fn is_our_hook(cmd: &str) -> bool {
     toks.next() == Some("claude-code") && toks.next() == Some("_hook")
 }
 
-/// The hook command line for settings.json. The executable is single-quoted
-/// when it contains whitespace, so a path like `/Users/Jane Doe/bin/papercut`
-/// still invokes as one token.
+/// The hook command line for settings.json. The executable is ALWAYS
+/// single-quoted, with any internal single quotes encoded via the shell `'\''`
+/// idiom that [`first_token`] / [`decode_single_quoted`] reverse on read-back.
+/// Quoting only on whitespace left an apostrophe-bearing path with NO space
+/// (e.g. `/home/O'Brien/.local/bin/papercut`) unquoted — the shell then rejects
+/// it as an unterminated quote, so the hook never fired while `doctor` parsed
+/// the path back and reported it healthy. Always quoting closes that hole
+/// regardless of which shell metacharacters the path contains; the trailing
+/// `_hook claude-code` tokens still anchor [`is_our_hook`].
 fn hook_command(exe: &str) -> String {
-    if exe.chars().any(char::is_whitespace) {
-        format!("'{}' _hook claude-code", exe.replace('\'', r"'\''"))
-    } else {
-        format!("{exe} _hook claude-code")
-    }
+    format!("'{}' _hook claude-code", exe.replace('\'', r"'\''"))
 }
 
 /// Remove our hook entries under `event`. Drops only groups papercut emptied

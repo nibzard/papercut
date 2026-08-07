@@ -109,6 +109,25 @@ fn interrupted_command_records_nothing() {
     assert!(session_signals("sess-i").is_empty());
 }
 
+/// Defensive: a PostToolUseFailure whose `error` carries "Exit code 0" is not a
+/// failure. A harness should never fire the failure event for a zero exit, but
+/// if one does we must not manufacture a signal. This is bash_failure's `Some(0)
+/// => None` arm — distinct from the success path (PostToolUse, no `error` at
+/// all) and the unparseable-code path.
+#[test]
+fn failure_event_with_zero_exit_records_nothing() {
+    let _env = IsolatedEnv::new();
+    hook(&failure_payload(
+        "true",
+        "Exit code 0\n(no output)",
+        "sess-z",
+    ));
+    assert!(
+        session_signals("sess-z").is_empty(),
+        "a zero-exit failure event must not record a signal"
+    );
+}
+
 /// The verified success shape: PostToolUse with a tool_response object and no
 /// exit information. Records nothing.
 #[test]

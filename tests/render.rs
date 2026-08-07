@@ -127,6 +127,100 @@ fn render_surfaces_skipped_file_reasons() {
     );
 }
 
+/// A quarantined event whose `context.repo` carries markdown (backticks, a
+/// link, an embedded newline) must NOT inject into the published PAPERCUTS.md
+/// skipped listing — the label is neutralized into a single code span. Before
+/// the md_code_span/md_single_line wrap, a crafted repo could forge a heading
+/// or link or break out of the skipped bullet when `render --write` committed
+/// the projection into a repo.
+#[test]
+fn render_neutralizes_markdown_in_skipped_repo() {
+    let _env = IsolatedEnv::new();
+    papercut::store::ensure_store().unwrap();
+    let dir = papercut::store::events_dir().unwrap();
+    // Parses, then is quarantined for an unsupported schema version — carrying
+    // its repo through to the skipped listing. The repo is laced with markdown.
+    // The `\n` inside the JSON string is a real newline in the value.
+    std::fs::write(
+        dir.join("pc_01K000000000000000000000X.json"),
+        r#"{
+            "schema_version": 99,
+            "id": "pc_01K000000000000000000000X",
+            "created_at": "2026-08-04T20:42:00Z",
+            "source": "in_moment",
+            "status": "open",
+            "summary": "x",
+            "context": { "repo": "`code` [link](http://evil)\n## evil-heading" }
+        }"#,
+    )
+    .unwrap();
+
+    let md = match commands::render::run(RenderArgs {
+        repo: "all".into(),
+        write: false,
+    }) {
+        RunResult::Ok { text, .. } => text,
+        other => panic!("render failed: {other:?}"),
+    };
+    // The repo's embedded newline did not forge a new heading line.
+    assert!(
+        !md.lines()
+            .any(|l| l.trim_start().starts_with("## evil-heading")),
+        "repo markdown must not forge a heading: {md}"
+    );
+    // The skipped entry stays one bullet line (newline collapsed into the span).
+    let bullets: Vec<&str> = md.lines().filter(|l| l.starts_with("> - ")).collect();
+    assert_eq!(bullets.len(), 1, "one collapsed skipped bullet: {md}");
+    // The repo text survives as literal text inside the code span.
+    assert!(md.contains("link"), "repo text still visible: {md}");
+}
+
+/// An event whose `id` field carries markdown (the lenient loader admits a
+/// non-ULID id — it validates status/resolution, never id format) must not forge
+/// structure in the published PAPERCUTS.md projection. The id is neutralized
+/// like every other rendered field; without the wrap a crafted id could forge a
+/// duplicate section heading and a peer bullet when `render --write` commits the
+/// projection into a repo.
+#[test]
+fn render_neutralizes_markdown_in_event_id() {
+    let _env = IsolatedEnv::new();
+    papercut::store::ensure_store().unwrap();
+    let dir = papercut::store::events_dir().unwrap();
+    std::fs::write(
+        dir.join("pc_01K000000000000000000000Y.json"),
+        r#"{
+            "schema_version": 1,
+            "id": "pc_evil\n## open (1)\n- fake",
+            "created_at": "2026-08-04T20:42:00Z",
+            "source": "in_moment",
+            "status": "open",
+            "summary": "real event",
+            "context": {}
+        }"#,
+    )
+    .unwrap();
+
+    let md = match commands::render::run(RenderArgs {
+        repo: "all".into(),
+        write: false,
+    }) {
+        RunResult::Ok { text, .. } => text,
+        other => panic!("render failed: {other:?}"),
+    };
+    // Exactly one `## open` heading (the real section header); the id's embedded
+    // newline must not forge a duplicate at column 0.
+    let open_headings = md.lines().filter(|l| l.starts_with("## open")).count();
+    assert_eq!(open_headings, 1, "no forged open heading from the id: {md}");
+    assert!(
+        !md.lines().any(|l| l.starts_with("- fake")),
+        "no forged bullet from the id: {md}"
+    );
+    assert!(
+        md.contains("real event"),
+        "the real summary is still present"
+    );
+}
+
 /// `render --write --repo <other>` from inside a different repo must REFUSE
 /// (exit 1) rather than drop a stray PAPERCUTS.md into the unrelated tree. We
 /// build a throwaway git repo so the cwd is detected as a real repo.

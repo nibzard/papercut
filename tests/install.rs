@@ -276,6 +276,54 @@ fn exe_path_with_space_and_apostrophe_round_trips() {
     );
 }
 
+/// An apostrophe-bearing exe path with NO space (e.g.
+/// `/home/O'Brien/.local/bin/papercut`) is the case quoting-on-whitespace
+/// missed: the path was emitted unquoted, so the shell rejected the bare
+/// apostrophe as an unterminated quote and the hook never fired — while
+/// `doctor` decoded the path back and reported it healthy. Always quoting fixes
+/// the runtime; this test pins it by EXECUTING the emitted command in a shell.
+#[test]
+#[cfg(unix)]
+fn exe_path_with_apostrophe_no_space_runs_in_shell() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = IsolatedEnv::new().with_claude();
+    let dir = env.home.join("O'Brien");
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("papercut");
+    std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    papercut::adapters::claude_code::install_hook(&exe.to_string_lossy()).unwrap();
+
+    let settings = env.home.join(".claude/settings.json");
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    let cmd = v
+        .pointer("/hooks/PostToolUseFailure/0/hooks/0/command")
+        .and_then(|c| c.as_str())
+        .unwrap();
+    assert!(
+        cmd.starts_with('\''),
+        "an apostrophe path must be quoted even without spaces: {cmd}"
+    );
+
+    // doctor's read-back still resolves (the regression was runtime-only).
+    let status = papercut::adapters::claude_code::hook_status();
+    assert!(status.present);
+    assert_eq!(status.exe.as_deref(), Some(&*exe.to_string_lossy()));
+    assert!(status.exe_ok, "doctor resolves the quoted apostrophe exe");
+
+    // The real regression guard: the emitted command is VALID SHELL and runs.
+    // Before the always-quote fix this exited non-zero (unterminated quote).
+    let rc = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .status()
+        .unwrap()
+        .code()
+        .unwrap();
+    assert_eq!(rc, 0, "the hook command must run in a shell: {cmd}");
+}
+
 /// A settings.json that is valid JSON but not an object (`[]`, `42`) makes
 /// install refuse ("root is not an object"); doctor must diagnose it too
 /// instead of hinting "run install" — which loops.

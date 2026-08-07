@@ -83,8 +83,12 @@ pub fn run(args: UninstallArgs) -> RunResult {
                     let (new_content, removed_block) = managed_block::remove(&text);
                     if removed_block {
                         // Reflect the actual on-disk outcome: a failed write
-                        // means the block is still present.
-                        match std::fs::write(file, &new_content) {
+                        // means the block is still present. Atomic (temp +
+                        // rename), matching install: this is the user's
+                        // hand-curated instructions file, so a crash mid-write
+                        // must never truncate content outside the managed
+                        // markers that `remove` preserved.
+                        match store::write_atomic(file, new_content.as_bytes()) {
                             Ok(()) => any_removed = true,
                             Err(e) => {
                                 errs.push(format!("{}: write {}: {e}", t.id, file.display()));

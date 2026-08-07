@@ -38,9 +38,9 @@ fn render_text(events: &[crate::model::Event], skipped: &[crate::store::SkippedF
         let repo = e.context.repo.as_deref().unwrap_or("(global)");
         out.push_str(&format!(
             "{}  {:9} {}  {}\n",
-            e.id,
+            md_single_line(&e.id),
             e.status.label(),
-            truncate(repo, 40),
+            truncate(&md_single_line(repo), 40),
             truncate(&md_single_line(&e.summary), 72),
         ));
     }
@@ -64,8 +64,8 @@ fn append_skipped(out: &mut String, skipped: &[crate::store::SkippedFile]) {
     for s in skipped.iter().take(SKIPPED_LIST_MAX) {
         out.push_str(&format!(
             "  - {}: {}\n",
-            s.file_label(),
-            truncate(&s.reason, SKIPPED_REASON_MAX)
+            md_single_line(&s.file_label()),
+            md_single_line(&truncate(&s.reason, SKIPPED_REASON_MAX))
         ));
     }
     if skipped.len() > SKIPPED_LIST_MAX {
@@ -144,5 +144,60 @@ mod tests {
             "multiline summary collapses to one row: {txt}"
         );
         assert!(txt.contains("first line") && txt.contains("second line"));
+    }
+
+    /// A skipped-file reason containing embedded markdown (a newline + heading,
+    /// a forged bullet) must collapse onto a single bullet line instead of
+    /// breaking out of the skipped listing into forged structure. Guards the
+    /// md_single_line neutralization shared by `list`, `render`, and `triage-pack`.
+    #[test]
+    fn skipped_reason_with_markdown_collapses_to_one_line() {
+        let skipped = vec![SkippedFile {
+            file: "pc_01KGARBAGE0000000000000Z.json".into(),
+            reason: "parse error\n## forged heading\n- forged bullet".into(),
+            repo: None,
+        }];
+        let txt = render_text(&[], &skipped);
+        let bullets: Vec<&str> = txt.lines().filter(|l| l.starts_with("  - pc_")).collect();
+        assert_eq!(bullets.len(), 1, "one collapsed skipped bullet: {txt}");
+        assert!(
+            !txt.lines().any(|l| l.trim_start().starts_with("## ")),
+            "no forged heading leaked onto its own line: {txt}"
+        );
+        assert!(
+            txt.contains("parse error") && txt.contains("forged"),
+            "reason text still present, just collapsed: {txt}"
+        );
+    }
+
+    /// An event whose `id` carries an embedded newline (a non-ULID id the lenient
+    /// loader admits, since it validates only status/resolution — not id format)
+    /// must NOT forge extra rows or a heading in the one-event-per-line listing.
+    /// The id is neutralized like every other field.
+    #[test]
+    fn id_with_embedded_newline_stays_one_row() {
+        let e = crate::model::Event {
+            schema_version: 1,
+            id: "pc_evil\n## forged\n- bullet".into(),
+            created_at: "2026-08-04T20:42:00Z".into(),
+            source: Source::InMoment,
+            status: Status::Open,
+            summary: "real".into(),
+            hypothesis: None,
+            suggested_fix: None,
+            category: None,
+            context: EventContext::default(),
+            resolution: None,
+        };
+        let txt = render_text(std::slice::from_ref(&e), &[]);
+        assert_eq!(
+            txt.lines().count(),
+            1,
+            "id newline collapses to one row: {txt}"
+        );
+        assert!(
+            !txt.lines().any(|l| l.trim_start().starts_with("## ")),
+            "no forged heading from the id: {txt}"
+        );
     }
 }

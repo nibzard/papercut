@@ -6,7 +6,7 @@ use crate::output::ErrorItem;
 use crate::paths::{data_root, resolve_repo_filter, RepoScope};
 use crate::projection::render_markdown;
 use crate::query::{current_repo, Filters};
-use crate::util::{truncate, SKIPPED_LIST_MAX, SKIPPED_REASON_MAX};
+use crate::util::{md_code_span, md_single_line, truncate, SKIPPED_LIST_MAX, SKIPPED_REASON_MAX};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -33,9 +33,9 @@ pub fn run(args: RenderArgs) -> RunResult {
         ));
         for s in skipped.iter().take(SKIPPED_LIST_MAX) {
             md.push_str(&format!(
-                "> - `{}`: {}\n",
-                s.file_label(),
-                truncate(&s.reason, SKIPPED_REASON_MAX)
+                "> - {}: {}\n",
+                md_code_span(&md_single_line(&s.file_label())),
+                md_single_line(&truncate(&s.reason, SKIPPED_REASON_MAX))
             ));
         }
         if skipped.len() > SKIPPED_LIST_MAX {
@@ -70,7 +70,12 @@ pub fn run(args: RenderArgs) -> RunResult {
             },
         };
         if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
+            // 0700 like the rest of the private store: for the global scope the
+            // parent IS data_root, so a first-ever `render --write` must create
+            // it owner-only, not at the umask default. For a repo-scoped write
+            // the parent is the existing repo root, which create_private_dir
+            // leaves untouched (existing dirs are never re-chmodded).
+            if let Err(e) = crate::store::create_private_dir(parent) {
                 return RunResult::err(ErrorItem::new(
                     "write_failed",
                     format!("cannot create {}: {e}", parent.display()),

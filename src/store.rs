@@ -36,7 +36,7 @@ pub fn ensure_store() -> anyhow::Result<()> {
 /// owner-only by default, not just private-by-location. Existing dirs are left
 /// as-is (a user may have intentionally widened them).
 #[cfg(unix)]
-fn create_private_dir(path: &Path) -> anyhow::Result<()> {
+pub(crate) fn create_private_dir(path: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -46,7 +46,7 @@ fn create_private_dir(path: &Path) -> anyhow::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn create_private_dir(path: &Path) -> anyhow::Result<()> {
+pub(crate) fn create_private_dir(path: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))
 }
 
@@ -397,15 +397,26 @@ mod tests {
         }
     }
 
+    /// Removes its temp tree on drop, including when the test body panics — so a
+    /// failing `with_store` test cannot leak a `pc-test-*` dir under `$TMP`.
+    /// (EnvGuard already restores the env vars on panic; this closes the fs side.)
+    struct TmpGuard(std::path::PathBuf);
+    impl Drop for TmpGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// Run `f` against a fresh, isolated store under a temp XDG_DATA_HOME.
-    /// The guard restores the prior HOME/XDG values even when `f` panics.
+    /// The guards restore the prior HOME/XDG values AND remove the temp tree,
+    /// even when `f` panics.
     fn with_store<F: FnOnce()>(f: F) {
         let _g = EnvGuard::acquire(&["HOME", "XDG_DATA_HOME"]);
         let tmp = std::env::temp_dir().join(format!("pc-test-{}", crate::id::new_id()));
         std::fs::create_dir_all(&tmp).unwrap();
         std::env::set_var("XDG_DATA_HOME", &tmp);
+        let _cleanup = TmpGuard(tmp);
         f();
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

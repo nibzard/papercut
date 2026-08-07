@@ -138,7 +138,7 @@ fn build_pack(
         for (i, e) in events.iter().enumerate() {
             let line = format!(
                 "- **{}** [{}] {}\n",
-                e.id,
+                md_single_line(&e.id),
                 e.status.label(),
                 md_indent_continuation(&truncate(&e.summary, 160), "  ")
             );
@@ -191,9 +191,9 @@ fn build_pack(
         let mut shown = 0usize;
         for s in skipped.iter().take(SKIPPED_LIST_MAX) {
             let line = format!(
-                "- _skipped_ `{}`: {}\n",
-                s.file_label(),
-                truncate(&s.reason, SKIPPED_REASON_MAX)
+                "- _skipped_ {}: {}\n",
+                md_code_span(&md_single_line(&s.file_label())),
+                md_single_line(&truncate(&s.reason, SKIPPED_REASON_MAX))
             );
             if out.len() + block.len() + line.len() > budget {
                 break;

@@ -218,19 +218,48 @@ fn sweep_file(
         new_offset: offset,
         emit_failed: false,
     };
-    let bytes = match std::fs::read(path) {
+    let mut bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(_) => return empty,
     };
+
+    // The rollout format is newline-delimited JSONL. A file that does not end in
+    // a newline has a trailing fragment that is EITHER (a) a record the writer is
+    // still appending — a partial line that will not parse — OR (b) a complete
+    // record whose terminating newline was never flushed (e.g. a session ended
+    // mid-line, or a writer that omits the final terminator). Case (a) MUST defer
+    // to the next sweep so we never race the writer; case (b) would otherwise be
+    // lost forever once the session goes quiet, because the file never grows past
+    // it. We tell them apart by parsing the trailing line: a complete record is
+    // given a synthetic terminator and swept now, while a partial line is left
+    // untouched for the next run.
+    let real_len = bytes.len();
+    if !bytes.ends_with(b"\n") {
+        let tail_start = bytes
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        if let Ok(tail) = std::str::from_utf8(&bytes[tail_start..]) {
+            let tail = tail.trim_end_matches(['\r', ' ', '\t']);
+            if !tail.is_empty() && serde_json::from_str::<Value>(tail).is_ok() {
+                bytes.push(b'\n');
+            }
+        }
+    }
+
     let start = (offset as usize).min(bytes.len());
     let buf = &bytes[start..];
 
-    // Only parse up to the last complete line; leave the trailing partial line
-    // (if the writer is mid-append) for the next run.
+    // Only parse up to the last complete line; a trailing partial line (a record
+    // the writer is mid-append) is left for the next run.
     let Some(last_nl) = buf.iter().rposition(|&b| b == b'\n') else {
         return empty; // no complete line yet
     };
-    let default_offset = offset + last_nl as u64 + 1;
+    // Cap at the real file length: a synthetic trailing newline (a complete
+    // record that lacked its own terminator) must not advance the watermark past
+    // the true end, or the next sweep would see `len < offset` and false-shrink.
+    let default_offset = (offset + last_nl as u64 + 1).min(real_len as u64);
 
     let mut emitted = 0usize;
     let mut had_command_event = false;

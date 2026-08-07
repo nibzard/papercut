@@ -373,3 +373,66 @@ fn missing_sessions_dir_warns_cleanly() {
         "absent sessions dir is a warning, not an error"
     );
 }
+
+/// A rollout whose final record is COMPLETE but has no terminating newline is
+/// still captured — the writer finished the line without flushing `\n`. Without
+/// the synthetic-terminator handling this record would be deferred forever once
+/// the session goes quiet, because the file never grows past it.
+#[test]
+fn complete_record_without_trailing_newline_is_captured() {
+    let env = IsolatedEnv::new().with_codex();
+    let f = env
+        .home
+        .join(".codex/sessions/2026/08/04/rollout-nonl.jsonl");
+    // META + CALL are newline-terminated; OUT_FAIL has NO trailing newline.
+    write_rollout(&f, &format!("{META}\n{CALL}\n{OUT_FAIL}"));
+
+    let o = codex::sweep();
+    assert_eq!(
+        o.signals_emitted, 1,
+        "the complete-but-unterminated final record is captured"
+    );
+    let (sigs, _) = papercut::signal::read_signals("codex");
+    assert_eq!(sigs.len(), 1);
+    assert_eq!(sigs[0].cmd, "make build");
+
+    // The watermark must not overshoot the real end: a re-sweep with no new
+    // content is a no-op, not a false shrink that would duplicate the signal.
+    let o2 = codex::sweep();
+    assert_eq!(o2.signals_emitted, 0, "no duplicate, no false shrink");
+    let (sigs2, _) = papercut::signal::read_signals("codex");
+    assert_eq!(sigs2.len(), 1);
+}
+
+/// A rollout whose final line is INCOMPLETE (the writer is mid-append) is left
+/// for the next sweep — never parsed mid-write. The synthetic-terminator logic
+/// must capture only a *complete* unterminated record; a partial line defers.
+/// The pending `function_call` survives in the watermark across the defer.
+#[test]
+fn partial_trailing_line_is_deferred_and_keeps_pending_call() {
+    let env = IsolatedEnv::new().with_codex();
+    let f = env
+        .home
+        .join(".codex/sessions/2026/08/04/rollout-torn.jsonl");
+    // Newline-terminated META + CALL, then a TORN final line (incomplete JSON,
+    // no terminator): the shape of a writer mid-append.
+    write_rollout(&f, &format!("{META}\n{CALL}\n{{\"partial"));
+
+    let o = codex::sweep();
+    assert_eq!(
+        o.signals_emitted, 0,
+        "a partial trailing line is deferred, never parsed"
+    );
+    let (sigs, _) = papercut::signal::read_signals("codex");
+    assert!(sigs.is_empty());
+
+    // The watermark stopped at the CALL line, so its pending call survives for
+    // the next sweep (it is not swallowed by advancing past the torn bytes).
+    let sweeps = papercut::store::read_sweeps();
+    let mark = &sweeps.marks["codex"];
+    let fm = &mark.files[&*f.to_string_lossy()];
+    assert!(
+        fm.pending_calls.contains_key("c1"),
+        "pending call c1 survives the deferred torn line"
+    );
+}
