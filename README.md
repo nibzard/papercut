@@ -51,6 +51,9 @@ fix belongs in your dotfiles or global agent instructions — not in any one pro
 
 ## Build & use
 
+> Full command reference — every flag, default, and the end-to-end lifecycle:
+> [docs/USAGE.md](docs/USAGE.md).
+
 A single self-contained Rust binary, boring crates only (`clap`, `serde`/`serde_json`,
 `ulid`, `anyhow`), no async runtime.
 
