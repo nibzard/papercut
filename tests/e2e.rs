@@ -38,7 +38,7 @@ fn fresh_home_install_add_render() {
     let (c, _, _) = run(&["install", "--yes"]);
     assert_eq!(c, 0);
     let claude_md = std::fs::read_to_string(env.home.join(".claude/CLAUDE.md")).unwrap();
-    assert!(claude_md.contains("papercut:begin v1"));
+    assert!(claude_md.contains("papercut:begin v2"));
 
     // add records an event and prints the id in text mode.
     let (c, out, err) = run(&["add", "shell ate my glob"]);

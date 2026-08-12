@@ -2,7 +2,7 @@
 //! instruction inside a harness's global instructions file.
 //!
 //! Invariant: `install`/`uninstall` only ever touch the whole-line span
-//! between `<!-- papercut:begin v1 -->` and `<!-- papercut:end -->`. Content
+//! between `<!-- papercut:begin v2 -->` and `<!-- papercut:end -->`. Content
 //! outside those markers is preserved byte-for-byte.
 //!
 //! Accepted limitation: inserting into a file whose last line has no trailing
@@ -18,7 +18,7 @@ pub enum Action {
 }
 
 /// Current managed-block version.
-pub const BLOCK_VERSION: u32 = 1;
+pub const BLOCK_VERSION: u32 = 2;
 
 /// The begin marker carries the version so `doctor` can detect staleness.
 pub fn begin_marker(version: u32) -> String {
@@ -29,13 +29,17 @@ pub const END_MARKER: &str = "<!-- papercut:end -->";
 
 /// The instruction body an agent reads. One report per apparent root cause;
 /// observation first, hypothesis/fix optional; logging never fails the task.
+///
+/// v2 leads with the no-`--` form so an agent composing `add "<msg>"`
+/// `--hypothesis …` does not hit the `--`-ends-option-parsing wall (the v1
+/// example always used `--`, which made trailing flags a usage error).
 pub const BLOCK_BODY: &str = concat!(
     "### Log papercuts\n",
     "When a repo-specific tool, command, setup step, error message, path convention, cache, or undocumented assumption causes an avoidable retry or dead end, record it immediately:\n",
     "\n",
-    "    papercut add -- \"<what you were doing, what got in the way, any verified workaround>\"\n",
+    "    papercut add \"<what you were doing, what got in the way, any verified workaround>\" --hypothesis \"<optional why>\" --fix \"<optional proposed fix>\"\n",
     "\n",
-    "One or two sentences. Facts first; causes and fixes are optional hypotheses (--hypothesis, --fix). One report per apparent root cause per session. Do not log ordinary debugging, accomplishments, product bugs, security issues, or feature requests. If unsure whether it qualifies, log it — triage is cheap. Logging must never interrupt or fail the task.",
+    "One or two sentences. Facts first; causes and fixes are optional. One report per apparent root cause per session. Do not log ordinary debugging, accomplishments, product bugs, security issues, or feature requests. If unsure whether it qualifies, log it — triage is cheap. Logging must never interrupt or fail the task. Put flags after the message; if the message itself begins with a dash, put every flag first, then `--`, then the message, e.g. `papercut add --hypothesis \"<why>\" -- \"<-y flag>\"`.",
 );
 
 /// The full block (begin marker + body + end marker), no trailing newline.
@@ -266,7 +270,7 @@ mod tests {
         let stale = format!("<!-- papercut:begin v0 -->\nold body\n{}\n", END_MARKER);
         let (got, action) = upsert(&stale);
         assert_eq!(action, Action::Updated);
-        assert!(got.contains("v1"));
+        assert!(got.contains(begin_marker(BLOCK_VERSION).as_str()));
         assert!(!got.contains("old body"));
     }
 

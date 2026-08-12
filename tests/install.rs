@@ -53,7 +53,7 @@ fn block_upsert_is_idempotent_and_preserves_user_content() {
     let after = std::fs::read_to_string(env.home.join(".claude/CLAUDE.md")).unwrap();
     assert!(after.contains("# My rules"), "user heading preserved");
     assert!(after.contains("Do good work."), "user body preserved");
-    assert!(after.contains("papercut:begin v1"));
+    assert!(after.contains("papercut:begin v2"));
     assert_eq!(after.matches("papercut:begin").count(), 1);
     let len1 = after.len();
 
@@ -469,7 +469,7 @@ fn doctor_flags_stale_block_version() {
     let p = env.home.join(".claude/CLAUDE.md");
     let c = std::fs::read_to_string(&p)
         .unwrap()
-        .replace("papercut:begin v1", "papercut:begin v0");
+        .replace("papercut:begin v2", "papercut:begin v0");
     std::fs::write(&p, c).unwrap();
 
     let data = doctor_data();
@@ -777,7 +777,7 @@ fn harness_filter_restricts_install_and_uninstall() {
 
     // claude-code got the block; codex's file was never created/touched.
     let claude_md = std::fs::read_to_string(env.home.join(".claude/CLAUDE.md")).unwrap();
-    assert!(claude_md.contains("papercut:begin v1"));
+    assert!(claude_md.contains("papercut:begin v2"));
     let codex_md = std::fs::read_to_string(env.home.join(".codex/AGENTS.md")).unwrap_or_default();
     assert!(
         !codex_md.contains("papercut"),
