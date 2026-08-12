@@ -61,11 +61,14 @@ pub enum Command {
 
     /// Emit a self-contained markdown triage bundle (open events + signal clusters).
     TriagePack(TriagePackArgs),
-
-    /// Hidden: live hook entry point. Reads the harness payload on stdin and
-    /// records a signal. Never prints, never fails the parent task.
-    #[command(name = "_hook", hide = true)]
-    Hook(HookArgs),
+    // NOTE: the live `_hook` entry point is intentionally NOT a clap subcommand.
+    // main.rs intercepts `_hook` before clap parses argv, because corrupted
+    // harness wiring can invoke it with bad args and that must never reach
+    // clap's usage-error path. Declaring it here (even `hide = true`) leaks its
+    // name into clap's subcommand-enumeration and near-miss suggestions, which
+    // then flow into the JSON envelope — violating the contract that the
+    // internal hook name never reaches an agent. `HookArgs` + `commands::hook`
+    // serve the pre-clap intercept directly.
 }
 
 #[derive(clap::Args)]
@@ -73,7 +76,9 @@ pub struct AddArgs {
     /// What you were doing and what got in the way (evidence). Required.
     ///
     /// Pass `--` first if the message begins with a dash, e.g.
-    /// `papercut add -- "-y ate my flag"`.
+    /// `papercut add -- "-y ate my flag"`. Put all flags (`--task`, …)
+    /// before `--`: `--` ends option parsing, so `add -- "m" --task x`
+    /// is a usage error (exit 2).
     pub message: String,
 
     /// Optional ticket / PRD reference.

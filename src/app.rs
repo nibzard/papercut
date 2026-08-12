@@ -59,13 +59,9 @@ impl RunResult {
 pub fn run(cli: Cli) -> i32 {
     let mode = cli.output;
 
-    // The hook path is the exception: silent and infallible from the caller's
-    // point of view, regardless of output mode.
-    if let Command::Hook(args) = cli.command {
-        commands::hook::run(args);
-        return 0;
-    }
-
+    // `_hook` never reaches here: main.rs intercepts it before clap parses argv
+    // (the hook path must stay silent and infallible, never hitting a usage
+    // error). So `cli.command` is always one of the user-facing commands below.
     let res = match cli.command {
         Command::Add(a) => commands::add::run(a),
         Command::List(a) => commands::list::run(a),
@@ -75,7 +71,6 @@ pub fn run(cli: Cli) -> i32 {
         Command::Doctor => commands::doctor::run(),
         Command::Sweep(a) => commands::sweep::run(a),
         Command::TriagePack(a) => commands::triage_pack::run(a),
-        Command::Hook(_) => unreachable!(),
     };
 
     match res {
