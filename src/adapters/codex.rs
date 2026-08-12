@@ -19,6 +19,7 @@ use crate::store::{read_sweeps, write_sweeps, FileMark, PendingCall, SessionCtx,
 use crate::util::{cap_chars, first_n_lines, truncate, CMD_MAX};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const HARNESS: &str = "codex";
@@ -83,10 +84,15 @@ pub fn sweep() -> SweepOutcome {
     let mut emit_failed = false;
     {
         let mark = sweeps.marks.entry(HARNESS.into()).or_default();
-        migrate_legacy(mark, &files);
+        // Adopt root-relative watermark keys (see `rel_key`), migrating any
+        // legacy absolute-path keys written by older papercut versions first so
+        // an upgrade never forces a cold re-sweep (and the duplicate signals it
+        // would emit).
+        relativize_legacy_keys(mark, &root);
+        migrate_legacy(mark, &files, &root);
 
         for file in &files {
-            let key = file.to_string_lossy().into_owned();
+            let key = rel_key(file, &root);
             let fm = mark.files.entry(key).or_default();
             let len = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
             if len < fm.offset {
@@ -123,8 +129,9 @@ pub fn sweep() -> SweepOutcome {
             }
         }
 
-        // Deleted session files leave no zombie marks behind.
-        mark.files.retain(|p, _| Path::new(p).exists());
+        // Deleted session files leave no zombie marks behind. Keys are
+        // root-relative, so reattach the root before the existence check.
+        mark.files.retain(|p, _| root.join(p).exists());
     }
 
     out.emit_failed = emit_failed;
@@ -162,14 +169,14 @@ pub fn sweep() -> SweepOutcome {
 /// duplicate emission, and future appends ARE picked up (which the old design
 /// lost). `last_path` itself carries its offset, pending calls, and session
 /// context over verbatim. The legacy fields are cleared and never written
-/// again.
-fn migrate_legacy(mark: &mut SweepMark, files: &[PathBuf]) {
+/// again. Inserted keys are root-relative (see `rel_key`).
+fn migrate_legacy(mark: &mut SweepMark, files: &[PathBuf], root: &Path) {
     let Some(lp) = mark.last_path.take() else {
         return;
     };
     if mark.files.is_empty() {
         for f in files {
-            let key = f.to_string_lossy().into_owned();
+            let key = rel_key(f, root);
             if f.as_path() < Path::new(&lp) {
                 let len = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
                 mark.files.insert(
@@ -196,6 +203,41 @@ fn migrate_legacy(mark: &mut SweepMark, files: &[PathBuf]) {
     mark.last_session = None;
 }
 
+/// Watermark key for `file`, relative to the sessions `root` so the marks
+/// survive a `$HOME` relocation: the absolute path changes, but the tree under
+/// `sessions/` does not, and a synced `sweeps.json` keeps matching its files.
+/// Falls back to the file's string form if `file` is not under `root`.
+fn rel_key(file: &Path, root: &Path) -> String {
+    file.strip_prefix(root)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| file.to_string_lossy().into_owned())
+}
+
+/// Convert legacy absolute-path watermark keys to root-relative keys, once. A
+/// key that is absolute but not under the current `root` — its `$HOME` is gone
+/// after a relocation — cannot be relocated, so it is dropped: those files
+/// re-sweep cleanly from the start rather than carrying a stale, never-matching
+/// offset. Keys already root-relative (current format) pass through untouched.
+fn relativize_legacy_keys(mark: &mut SweepMark, root: &Path) {
+    if mark.files.is_empty() {
+        return;
+    }
+    let mut next: BTreeMap<String, FileMark> = BTreeMap::new();
+    for (k, v) in std::mem::take(&mut mark.files) {
+        let p = Path::new(&k);
+        let rel = if p.is_absolute() {
+            match p.strip_prefix(root) {
+                Ok(r) => r.to_string_lossy().into_owned(),
+                Err(_) => continue, // absolute under a gone home; drop it
+            }
+        } else {
+            k // already root-relative
+        };
+        next.entry(rel).or_insert(v);
+    }
+    mark.files = next;
+}
+
 struct FileResult {
     emitted: usize,
     had_command_event: bool,
@@ -218,10 +260,27 @@ fn sweep_file(
         new_offset: offset,
         emit_failed: false,
     };
-    let mut bytes = match std::fs::read(path) {
-        Ok(b) => b,
+    // Read only the tail since the last sweep's offset, not the whole file: a
+    // long-lived session log keeps growing, and re-reading the already-processed
+    // prefix each run would scale memory and I/O with cumulative file size rather
+    // than with the new content. The watermark guarantees `offset` sits on a line
+    // boundary, so seeking here lands at the start of the next record.
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
         Err(_) => return empty,
     };
+    let real_len = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(_) => return empty,
+    };
+    let seek_to = offset.min(real_len);
+    if file.seek(SeekFrom::Start(seek_to)).is_err() {
+        return empty;
+    }
+    let mut bytes = Vec::new();
+    if file.read_to_end(&mut bytes).is_err() {
+        return empty;
+    }
 
     // The rollout format is newline-delimited JSONL. A file that does not end in
     // a newline has a trailing fragment that is EITHER (a) a record the writer is
@@ -232,8 +291,8 @@ fn sweep_file(
     // lost forever once the session goes quiet, because the file never grows past
     // it. We tell them apart by parsing the trailing line: a complete record is
     // given a synthetic terminator and swept now, while a partial line is left
-    // untouched for the next run.
-    let real_len = bytes.len();
+    // untouched for the next run. The tail read above ends at EOF, so the file's
+    // trailing fragment is the tail's trailing fragment.
     if !bytes.ends_with(b"\n") {
         let tail_start = bytes
             .iter()
@@ -248,8 +307,8 @@ fn sweep_file(
         }
     }
 
-    let start = (offset as usize).min(bytes.len());
-    let buf = &bytes[start..];
+    // `bytes` is already the tail from `offset`; no processed prefix to skip.
+    let buf = &bytes[..];
 
     // Only parse up to the last complete line; a trailing partial line (a record
     // the writer is mid-append) is left for the next run.
@@ -259,7 +318,7 @@ fn sweep_file(
     // Cap at the real file length: a synthetic trailing newline (a complete
     // record that lacked its own terminator) must not advance the watermark past
     // the true end, or the next sweep would see `len < offset` and false-shrink.
-    let default_offset = (offset + last_nl as u64 + 1).min(real_len as u64);
+    let default_offset = (offset + last_nl as u64 + 1).min(real_len);
 
     let mut emitted = 0usize;
     let mut had_command_event = false;

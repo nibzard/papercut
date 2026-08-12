@@ -278,10 +278,12 @@ pub struct Sweeps {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SweepMark {
-    /// Per-file progress: absolute session-file path → its mark. Every file
-    /// keeps its own offset, pending calls, and session context, so parallel
-    /// sessions never lose appended content and a call/output pair split
-    /// across sweeps is matched whenever the output arrives.
+    /// Per-file progress: session-file path relative to the harness sessions
+    /// root → its mark. Every file keeps its own offset, pending calls, and
+    /// session context, so parallel sessions never lose appended content and a
+    /// call/output pair split across sweeps is matched whenever the output
+    /// arrives. Relative keys survive a `$HOME` relocation; legacy absolute
+    /// keys are folded to relative on load (see `codex::relativize_legacy_keys`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub files: BTreeMap<String, FileMark>,
 

@@ -30,6 +30,16 @@ fn append_rollout(path: &std::path::Path, body: &str) {
     fh.write_all(body.as_bytes()).unwrap();
 }
 
+/// The root-relative watermark key `sweep` stores for a session file, mirroring
+/// `codex::rel_key`: stable across a `$HOME` relocation because only the tree
+/// under `sessions/` is recorded.
+fn rel_key(home: &std::path::Path, p: &std::path::Path) -> String {
+    p.strip_prefix(home.join(".codex/sessions"))
+        .unwrap_or(p)
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[test]
 fn failing_command_produces_signal() {
     let env = IsolatedEnv::new().with_codex();
@@ -326,11 +336,11 @@ fn deleted_file_mark_is_pruned() {
     let sweeps = papercut::store::read_sweeps();
     let files = &sweeps.marks["codex"].files;
     assert!(
-        !files.contains_key(&*f.to_string_lossy()),
+        !files.contains_key(&rel_key(&env.home, &f)),
         "deleted file's mark is pruned"
     );
     assert!(
-        files.contains_key(&*keep.to_string_lossy()),
+        files.contains_key(&rel_key(&env.home, &keep)),
         "surviving file's mark is kept"
     );
 }
@@ -430,9 +440,100 @@ fn partial_trailing_line_is_deferred_and_keeps_pending_call() {
     // the next sweep (it is not swallowed by advancing past the torn bytes).
     let sweeps = papercut::store::read_sweeps();
     let mark = &sweeps.marks["codex"];
-    let fm = &mark.files[&*f.to_string_lossy()];
+    let fm = &mark.files[&rel_key(&env.home, &f)];
     assert!(
         fm.pending_calls.contains_key("c1"),
         "pending call c1 survives the deferred torn line"
+    );
+}
+
+/// #11: watermark keys are root-relative, and a legacy absolute-path key (the
+/// old format, or one written under a since-relocated `$HOME`) is migrated on
+/// load so resuming does not re-emit signals already recorded. With absolute
+/// keys, a copied/synced `sweeps.json` would miss the new path and cold-sweep,
+/// duplicating every prior signal.
+#[test]
+fn legacy_absolute_key_is_relativized_without_duplicate() {
+    let env = IsolatedEnv::new().with_codex();
+    let f = env
+        .home
+        .join(".codex/sessions/2026/08/04/rollout-relocate.jsonl");
+    let body = format!("{META}\n{CALL}\n{OUT_FAIL}\n");
+    write_rollout(&f, &body);
+
+    // Pre-seed sweeps.json as an OLD version would: an ABSOLUTE-path key for
+    // this file, marked fully swept (offset == file length).
+    let len = std::fs::metadata(&f).unwrap().len();
+    let mut sweeps = papercut::store::Sweeps::default();
+    let mut mark = papercut::store::SweepMark::default();
+    mark.files.insert(
+        f.to_string_lossy().into_owned(),
+        papercut::store::FileMark {
+            offset: len,
+            ..Default::default()
+        },
+    );
+    sweeps.marks.insert("codex".into(), mark);
+    papercut::store::write_sweeps(&sweeps).unwrap();
+
+    // Sweep: the absolute key migrates to relative, matches the file, and its
+    // offset already covers the whole file — so nothing is re-emitted.
+    let out = codex::sweep();
+    assert_eq!(
+        out.signals_emitted, 0,
+        "migrated watermark skips a redundant re-sweep: {out:?}"
+    );
+
+    // The persisted key is now root-relative, and the absolute key is gone.
+    let after = papercut::store::read_sweeps();
+    let files = &after.marks["codex"].files;
+    assert!(
+        files.contains_key(&rel_key(&env.home, &f)),
+        "key relativized on load: {files:?}"
+    );
+    assert!(
+        !files.contains_key(&*f.to_string_lossy()),
+        "legacy absolute key dropped: {files:?}"
+    );
+
+    // And a subsequent sweep with no new content is still a no-op.
+    let again = codex::sweep();
+    assert_eq!(again.signals_emitted, 0, "idempotent after migration");
+}
+
+/// #11: an absolute-path key whose `$HOME` is gone (a real relocation to a new
+/// machine) cannot be relativized, so it is dropped — those files re-sweep from
+/// the start. The sweep must still emit the signal for the now-unmarked file.
+#[test]
+fn orphaned_absolute_key_under_gone_home_is_dropped_and_reswept() {
+    let env = IsolatedEnv::new().with_codex();
+    let f = env.home.join(".codex/sessions/2026/08/04/rollout-orphan.jsonl");
+    write_rollout(&f, &format!("{META}\n{CALL}\n{OUT_FAIL}\n"));
+
+    // An absolute key under a DIFFERENT root that no longer exists: the file at
+    // `f` has no mark, and the stale mark points at a path nothing matches.
+    let mut sweeps = papercut::store::Sweeps::default();
+    let mut mark = papercut::store::SweepMark::default();
+    mark.files.insert(
+        "/gone/home/.codex/sessions/2026/08/04/rollout-orphan.jsonl".into(),
+        papercut::store::FileMark {
+            offset: 9999,
+            ..Default::default()
+        },
+    );
+    sweeps.marks.insert("codex".into(), mark);
+    papercut::store::write_sweeps(&sweeps).unwrap();
+
+    let out = codex::sweep();
+    assert_eq!(out.signals_emitted, 1, "unmarked real file is swept: {out:?}");
+    let after = papercut::store::read_sweeps();
+    let files = &after.marks["codex"].files;
+    assert!(
+        !files.contains_key("/gone/home/.codex/sessions/2026/08/04/rollout-orphan.jsonl"),
+        "orphan absolute key dropped: {files:?}"
+    );
+    assert!(
+        files.contains_key(&rel_key(&env.home, &f)),
+        "real file recorded under a relative key: {files:?}"
     );
 }
