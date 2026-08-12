@@ -24,7 +24,10 @@ pub fn run(args: InstallArgs) -> RunResult {
             "no_harnesses",
             "no harnesses detected to install into",
             false,
-            "create the harness config dir (e.g. ~/.claude), or pass --harness <id>",
+            "detection is by config dir: create one to install into it — \
+             ~/.claude (Claude Code), ~/.codex (Codex), or ~/.config/opencode \
+             (OpenCode), then rerun install. --harness <id> only narrows already-\
+             detected harnesses; it cannot make an undetected one appear",
         ));
     }
 
