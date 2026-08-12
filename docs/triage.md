@@ -91,7 +91,10 @@ Rules enforced by `Event::validate`:
 - Every terminal status (`fixed`, `promoted`, `duplicate`, `dismissed`) requires a
   non-empty `resolution.reason`.
 - `fixed` additionally requires a non-empty `resolution.ref` (where the fix landed).
-- A non-terminal event (`open`, `candidate`) must **not** carry a resolution.
+- A non-terminal event (`open`, `candidate`) **may** keep a stale `resolution` in its
+  file — for example, after flipping a `fixed` event back to `open` to reopen it.
+  `validate` does not reject it; `render` and `list` project off `status`, not
+  `resolution`, so the stale resolution is simply not shown.
 
 Promote a `candidate` cluster into a tracked item by writing a new event (or editing an
 existing `candidate` event) with `source: "triage"`. After closing, regenerate the

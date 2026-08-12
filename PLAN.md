@@ -94,7 +94,7 @@ Core commands:
 | `papercut uninstall` | Remove all managed blocks and adapters cleanly. |
 | `papercut doctor` | Verify store permissions, managed blocks intact, adapter/hook wiring live, agent detection working. Deterministic remediation hints. |
 | `papercut sweep` | Parse harness session logs since last sweep; extract failure signals into the store. |
-| `papercut triage-pack` | Emit a self-contained markdown bundle (open events, signal clusters, recurrence counts) for any agent to triage. |
+| `papercut triage-pack` | Emit a self-contained markdown bundle (open events, signal clusters grouped by failing program and verb subcommand with recurrence counts and a modal sample) for any agent to triage. |
 
 Deferred until hand-editing hurts twice: `close`, `promote`, `dedupe` as commands —
 status changes are edits to one JSON field, and `render` picks them up.
@@ -162,18 +162,13 @@ For each detected harness, upsert this block into its **global** instructions fi
 (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, OpenCode's global config, …):
 
 ```markdown
-<!-- papercut:begin v1 -->
+<!-- papercut:begin v2 -->
 ### Log papercuts
-When a repo-specific tool, command, setup step, error message, path convention, cache,
-or undocumented assumption causes an avoidable retry or dead end, record it immediately:
+When a repo-specific tool, command, setup step, error message, path convention, cache, or undocumented assumption causes an avoidable retry or dead end, record it immediately:
 
-    papercut add -- "<what you were doing, what got in the way, any verified workaround>"
+    papercut add "<what you were doing, what got in the way, any verified workaround>" --hypothesis "<optional why>" --fix "<optional proposed fix>"
 
-One or two sentences. Facts first; causes and fixes are optional hypotheses
-(--hypothesis, --fix). One report per apparent root cause per session. Do not log
-ordinary debugging, accomplishments, product bugs, security issues, or feature
-requests. If unsure whether it qualifies, log it — triage is cheap. Logging must
-never interrupt or fail the task.
+One or two sentences. Facts first; causes and fixes are optional. One report per apparent root cause per session. Do not log ordinary debugging, accomplishments, product bugs, security issues, or feature requests. If unsure whether it qualifies, log it — triage is cheap. Logging must never interrupt or fail the task. Put flags after the message; if the message itself begins with a dash, put every flag first, then `--`, then the message, e.g. `papercut add --hypothesis "<why>" -- "<-y flag>"`.
 <!-- papercut:end -->
 ```
 
@@ -184,7 +179,7 @@ Never touch content outside the markers.
 
 | Harness | Mechanism | Tier |
 | --- | --- | --- |
-| Claude Code | `PostToolUse` hook on Bash: on non-zero exit, append one signal line. Installed into global settings by `papercut install`. | live |
+| Claude Code | `PostToolUseFailure` hook on Bash: on non-zero exit, append one signal line. Installed into global settings by `papercut install`. | live |
 | Codex | No hook → `papercut sweep` parses on-disk session logs (JSONL under `~/.codex/`; verify format). | sweep |
 | OpenCode | Managed block + Layer-2 reports. No verified silent global hook API as of 2026-08-04 — promote to `live` only after verifying a hook/plugin equivalent against an installed OpenCode (never from memory or docs). | none |
 | Anything else | Reports-only (Layer 2 still works). Add adapters on demand. | none |
@@ -229,7 +224,7 @@ e2e check — a friction-reporting tool must score well on agent-friction benchm
   content around blocks; e2e: fresh fake HOME → install → add → render.
 
 ### Phase 2 — first live adapter (Claude Code) + doctor
-- PostToolUse hook script + `install` wiring into global settings; `doctor` to
+- PostToolUseFailure hook script + `install` wiring into global settings; `doctor` to
   verify the wiring it creates.
 - Tests: non-zero exit produces exactly one signal line; zero exit produces nothing;
   hook killed mid-write corrupts nothing and the parent task never notices; garbage

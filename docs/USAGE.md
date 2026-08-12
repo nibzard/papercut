@@ -38,7 +38,7 @@ papercut doctor                   # verify store, managed blocks, and hook wirin
 - upserts a managed `<!-- papercut:begin --> … <!-- papercut:end -->` block into
   its **global** instructions file (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`,
   …) that tells the agent when and how to report friction;
-- for Claude Code, also adds a `PostToolUse` hook to `~/.claude/settings.json`
+- for Claude Code, also adds a `PostToolUseFailure` hook to `~/.claude/settings.json`
   that records failed Bash commands.
 
 `--yes` is required — it never prompts. `--harness claude-code,codex` restricts
@@ -62,7 +62,7 @@ remediation hints for anything wrong.
 **Voluntary — Layer 2, high signal (the agent calls it):**
 
 ```
-papercut add -- "glob ate my args without nullglob set"
+papercut add "glob ate my args without nullglob set"
 papercut add 'flaky CI test' --task PROJ-42 --category tooling \
               --hypothesis 'race on a shared /tmp' --fix 'use mkdtemp'
 ```
@@ -80,8 +80,10 @@ when nothing matches), and timestamp. The message is required and is the only
 | `--hypothesis "<…>"` | why you think it happened (a guess, not evidence) |
 | `--fix "<…>"` | a proposed fix |
 
-Use `--` before the message if it begins with a dash. `add` prints the new event
-id in both text and `--output json` so the agent can reference it later.
+Use `--` before the message if it begins with a dash — but put every flag
+(`--task`, `--hypothesis`, …) BEFORE `--`: `--` ends option parsing, so
+`add -- "msg" --hypothesis x` is a usage error (exit 2). `add` prints the new
+event id in both text and `--output json` so the agent can reference it later.
 
 ## 3. Read
 
@@ -106,10 +108,12 @@ papercut render --repo . --write
 | `--repo <spec>` | `.` = current repo (default) · `all` = global |
 | `--write` | also write `PAPERCUTS.md` |
 
-Inside a repo, `render --write` writes to the repo root; `--repo all --write`
-writes the global view into the store. `render --write` **refuses** a write that
-targets a different repo than the cwd, or any write outside a repo (exit 1),
-rather than drop a stray `PAPERCUTS.md` somewhere unexpected.
+Inside a repo, `render --write` writes to the repo root. `--repo all --write`
+writes the global view into the store. Outside any repo, the default `--repo .`
+has no current repo to scope to, so `render --write` writes the global view into
+the store too (exit 0) — the same as `--repo all --write`. `render --write
+--repo <id>` is refused (exit 1) when `<id>` is not the current repo or when run
+outside any repo, rather than drop a stray `PAPERCUTS.md` somewhere unexpected.
 
 **Structured output.** Every command takes global `--output json` (default
 `text`) and returns one envelope:
