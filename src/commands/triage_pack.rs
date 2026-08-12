@@ -49,7 +49,10 @@ pub fn run(args: TriagePackArgs) -> RunResult {
 
 struct Cluster {
     key: String,
-    sample: String,
+    /// Distinct real commands seen in this cluster → their counts, used to pick
+    /// a modal sample (the most frequent command) so the rendered headline
+    /// reflects what actually recurred, not whichever signal sorted first.
+    cmds: BTreeMap<String, usize>,
     count: usize,
     repos: BTreeSet<String>,
     agents: BTreeSet<String>,
@@ -68,15 +71,17 @@ fn cluster_signals(scope: &RepoScope) -> Vec<Cluster> {
                     continue;
                 }
             }
-            let key = normalize_key(&s.cmd);
+            let real = last_real_command(&s.cmd);
+            let key = key_of(real);
             let c = map.entry(key.clone()).or_insert_with(|| Cluster {
                 key: key.clone(),
-                sample: s.cmd.clone(),
+                cmds: BTreeMap::new(),
                 count: 0,
                 repos: BTreeSet::new(),
                 agents: BTreeSet::new(),
             });
             c.count += 1;
+            *c.cmds.entry(real.to_string()).or_insert(0) += 1;
             if let Some(r) = s.repo {
                 c.repos.insert(r);
             }
@@ -90,11 +95,102 @@ fn cluster_signals(scope: &RepoScope) -> Vec<Cluster> {
     v
 }
 
-/// Group failures by their program (first token, basename if path-like).
+/// Programs whose first argument is a verb subcommand (e.g. `git pull`), not a
+/// filename or target, so `git pull` and `git push` cluster separately. Keep
+/// this to well-known multi-subcommand CLIs; for any other program the program
+/// name alone is the key (so `python3 a.py` and `python3 b.py` group as
+/// `python3`, not one cluster per script).
+const SUBCOMMAND_TOOLS: &[&str] = &[
+    "git", "cargo", "npm", "yarn", "pnpm", "go", "kubectl", "docker", "brew", "apt",
+    "apt-get", "pip", "pip3", "rustup", "mix", "mvn", "gradle", "rake", "composer", "gem",
+];
+
+/// The real command in `cmd`, stripped of directory-change and privilege
+/// prefixes so `cd repo && go run ./cmd` and `sudo apt-get install x` resolve to
+/// the program that actually did the work. A `&&` chain stops at its first
+/// failure, so the last real segment is the best single representative; full
+/// attribution across a chain stays a Layer 3 judgment, never a cluster concern.
+fn last_real_command(cmd: &str) -> &str {
+    let mut last_real: Option<&str> = None;
+    for seg in cmd.split("&&") {
+        let s = seg.trim();
+        if s.is_empty() {
+            continue;
+        }
+        // Drop a leading `sudo ` privilege prefix within this segment, but only
+        // when it is the whole first word (followed by whitespace) — `sudoedit`
+        // and any other program starting with those four bytes stay intact.
+        let s = match s.strip_prefix("sudo") {
+            Some(rest) if rest.starts_with(char::is_whitespace) => rest.trim_start(),
+            _ => s,
+        };
+        if s.is_empty() {
+            continue;
+        }
+        let prog = s.split_whitespace().next().unwrap_or("");
+        let base = prog.rsplit('/').next().unwrap_or(prog);
+        if base.eq_ignore_ascii_case("cd") {
+            continue; // a directory change, not a real command
+        }
+        last_real = Some(s);
+    }
+    last_real.unwrap_or(cmd.trim())
+}
+
+/// Cluster key for an already-stripped real command: the program basename,
+/// plus the verb subcommand for known multi-subcommand CLIs. Display
+/// correction only — this never interprets the exit code (Layer 3's job).
+fn key_of(real: &str) -> String {
+    let mut toks = real.split_whitespace();
+    let prog = toks.next().unwrap_or("");
+    let key_root = prog.rsplit('/').next().unwrap_or(prog).to_ascii_lowercase();
+    if key_root.is_empty() {
+        return String::new();
+    }
+    if SUBCOMMAND_TOOLS.contains(&key_root.as_str()) {
+        // The verb is the first positional token after the program, skipping
+        // flags and the separate value of a value-taking flag. A bare `--flag`
+        // or `-f` may consume the next token as its value (e.g. the `repo` in
+        // `git -C repo pull`, or the path in `cargo --manifest-path x build`),
+        // so the token after such a flag is skipped; a `--flag=value` attaches
+        // its own value and does not. This keeps `git -C repo pull` keyed as
+        // `git pull`, not `git repo`. A boolean flag before the verb (e.g.
+        // `git -v push`) has no separate value, so the verb is skipped and the
+        // cluster falls back to the program-only key — a rare over-merge, never
+        // a mislabel.
+        let mut prev_was_value_flag = false;
+        for t in toks {
+            if t.starts_with('-') {
+                prev_was_value_flag = !t.contains('=');
+                continue;
+            }
+            if prev_was_value_flag {
+                prev_was_value_flag = false;
+                continue;
+            }
+            return format!("{key_root} {}", t.to_ascii_lowercase());
+        }
+    }
+    key_root
+}
+
+/// Group a failing command into a cluster key that reflects what ran.
+/// Test-only convenience over the two-step `last_real_command` + `key_of` the
+/// production path uses (which also needs the real command for the modal sample).
+#[cfg(test)]
 fn normalize_key(cmd: &str) -> String {
-    let tok = cmd.split_whitespace().next().unwrap_or("");
-    let base = tok.rsplit('/').next().unwrap_or(tok);
-    base.to_lowercase()
+    key_of(last_real_command(cmd))
+}
+
+/// The most frequent real command in a cluster — the representative sample so
+/// `984×` over mostly `git push` shows a `git push` sample, not a 1-of-984
+/// outlier. Ties break to the lexicographically smallest command (deterministic).
+fn cluster_sample(c: &Cluster) -> &str {
+    c.cmds
+        .iter()
+        .max_by(|(ka, va), (kb, vb)| va.cmp(vb).then_with(|| kb.cmp(ka)))
+        .map(|(cmd, _)| cmd.as_str())
+        .unwrap_or("")
 }
 
 fn build_pack(
@@ -140,7 +236,10 @@ fn build_pack(
                 "- **{}** [{}] {}\n",
                 md_single_line(&e.id),
                 e.status.label(),
-                md_indent_continuation(&truncate(&e.summary, 160), "  ")
+                // Content column 2 under the `- ` bullet → safe indent 6
+                // (util::safe_continuation_indent), so a multiline summary can
+                // never forge a heading/bullet/fence in the model-facing pack.
+                md_indent_continuation(&truncate(&e.summary, 160), "      ")
             );
             if out.len() + line.len() > budget {
                 omitted = events.len() - i;
@@ -232,8 +331,66 @@ fn format_cluster(c: &Cluster) -> String {
     format!(
         "- **{count}×** {sample} — agents: {agents}; repos: {repos}\n",
         count = c.count,
-        sample = md_code_span(&truncate(&c.sample, 80)),
+        sample = md_code_span(&truncate(cluster_sample(c), 80)),
         agents = truncate(&md_single_line(&agents), 60),
         repos = truncate(&md_single_line(&repos), 60),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_distinguishes_subcommands() {
+        // The old first-token key collapsed all of these to `git`.
+        assert_eq!(normalize_key("git pull"), "git pull");
+        assert_eq!(normalize_key("git push origin main"), "git push");
+        assert_eq!(normalize_key("git fetch"), "git fetch");
+        assert_eq!(normalize_key("/usr/bin/git status"), "git status");
+        // A flag (and its value) before the verb is skipped.
+        assert_eq!(normalize_key("git -C /repo pull"), "git pull");
+    }
+
+    #[test]
+    fn key_skips_value_taking_flags_to_find_the_verb() {
+        // A value-taking flag whose VALUE starts with a letter must not be
+        // mistaken for the verb (the original alphabetic-first-token rule did).
+        assert_eq!(normalize_key("git -C repo pull"), "git pull");
+        assert_eq!(normalize_key("git --git-dir foo pull"), "git pull");
+        assert_eq!(normalize_key("git -c user.email=x commit"), "git commit");
+        assert_eq!(
+            normalize_key("cargo --manifest-path Cargo.toml build"),
+            "cargo build"
+        );
+        // An attached `--flag=value` consumes its own value, so the next token
+        // IS the verb.
+        assert_eq!(normalize_key("git --git-dir=foo pull"), "git pull");
+    }
+
+    #[test]
+    fn key_strips_cd_and_sudo_prefixes() {
+        // The old first-token key labeled both of these `cd` / `sudo`.
+        assert_eq!(normalize_key("cd /x && go run ./cmd"), "go run");
+        assert_eq!(normalize_key("cd /a && cd /b && rg foo"), "rg");
+        assert_eq!(normalize_key("sudo apt-get install x"), "apt-get install");
+        // `sudo` is stripped only as a whole first word — `sudoedit` is a
+        // distinct program and must not be mangled into `edit`.
+        assert_eq!(normalize_key("sudoedit /etc/sudoers"), "sudoedit");
+    }
+
+    #[test]
+    fn key_groups_arbitrary_program_by_name_only() {
+        // No verb subcommand → group by program, so script/target names do not
+        // fragment the cluster.
+        assert_eq!(normalize_key("python3 a.py"), "python3");
+        assert_eq!(normalize_key("python3 b.py"), "python3");
+        assert_eq!(normalize_key("rg -n pattern"), "rg");
+    }
+
+    #[test]
+    fn key_handles_empty_input() {
+        assert_eq!(normalize_key(""), "");
+        assert_eq!(normalize_key("   "), "");
+    }
 }

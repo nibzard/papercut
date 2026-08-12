@@ -93,6 +93,22 @@ pub fn md_indent_continuation(s: &str, indent: &str) -> String {
     out
 }
 
+/// Minimum indentation (in spaces) for a continuation line of a free-text
+/// field so it can **never** start a new markdown block — an ATX heading, a
+/// bullet, a fenced code block, a blockquote, a setext underline, or an HTML
+/// block — inside a list item whose text content begins at `content_col`.
+///
+/// CommonMark lets every one of those constructs begin with up to 3 spaces of
+/// indentation *relative to the enclosing list item's content column*. A
+/// continuation line indented to `content_col + 4` therefore lands any forged
+/// marker at relative column 4, past the 0–3 window: it stays a literal
+/// paragraph continuation instead of structuring the document. The render and
+/// triage-pack callers indent multiline summaries, hypotheses, fixes, and
+/// resolutions to exactly this value for their bullet depth.
+pub const fn safe_continuation_indent(content_col: usize) -> usize {
+    content_col + 4
+}
+
 /// Wrap `s` in a markdown code span using enough backticks to contain the
 /// longest backtick run in `s`, so a value containing backticks — a shell
 /// command like `` echo `whoami` `` — cannot break out of the span. With no
@@ -100,6 +116,14 @@ pub fn md_indent_continuation(s: &str, indent: &str) -> String {
 /// to a hand-written `` `s` ``; with backticks the fence grows by one and is
 /// space-padded so a leading/trailing backtick cannot merge with it.
 pub fn md_code_span(s: &str) -> String {
+    // Collapse internal whitespace (newlines included) to one line first. An
+    // inline code span cannot span a line break: CommonMark parses blocks
+    // before inlines, so a value like `foo\n## evil` would let the second line
+    // be parsed as a fresh block (a forged heading or bullet) rather than stay
+    // inside the span. Every caller renders an inline single-line value (a
+    // command, ref, sha, path, id), so this is the correct display shape and
+    // the values two callers already `md_single_line` are unaffected.
+    let s = md_single_line(s);
     let mut longest = 0usize;
     let mut run = 0usize;
     for b in s.bytes() {
@@ -139,15 +163,31 @@ mod md_tests {
     }
 
     #[test]
+    fn safe_indent_is_past_the_block_window() {
+        // CommonMark block starts allow 0..3 spaces relative to the content
+        // column, so the safe continuation indent is content column + 4.
+        assert_eq!(safe_continuation_indent(2), 6); // `- ` bullet
+        assert_eq!(safe_continuation_indent(4), 8); // `  - ` sub-bullet
+    }
+
+    #[test]
     fn indent_continuation_defeats_a_forged_heading() {
-        let forged = "real\n## evil heading\n- fake peer";
-        let out = md_indent_continuation(forged, "  ");
-        // No emitted line starts at column 0 with the forged heading.
-        assert!(
-            !out.lines()
-                .any(|l| l.starts_with("## ") || l.starts_with("- ")),
-            "forged structure neutralized: {out}"
-        );
+        // Rendered under a `- ` bullet the summary's content column is 2, so the
+        // safe continuation indent is 6 (see `safe_continuation_indent`).
+        let indent = " ".repeat(safe_continuation_indent(2));
+        let forged = "real\n## evil heading\n- fake peer\n```\n> quote\n---";
+        let out = md_indent_continuation(forged, &indent);
+        // Every continuation line begins with >= 6 spaces, so under a content
+        // column of 2 every forged block marker sits at relative column >= 4 —
+        // past CommonMark's 0..3 block-start window. It cannot structure the
+        // doc; it can only be literal paragraph text.
+        for l in out.lines().skip(1) {
+            let leading = l.len() - l.trim_start().len();
+            assert!(
+                leading >= safe_continuation_indent(2),
+                "continuation not past the block window: {l:?}"
+            );
+        }
         assert!(out.contains("real") && out.contains("evil heading"));
     }
 
@@ -173,5 +213,20 @@ mod md_tests {
             span.starts_with("``` "),
             "triple fence for a double run: {span}"
         );
+    }
+
+    #[test]
+    fn code_span_neutralizes_newlines() {
+        // An inline code span cannot contain a line break: CommonMark parses
+        // blocks before inlines, so `foo\n## evil` would let the second line
+        // forge a heading. The span collapses to one line so no embedded
+        // newline (or the block marker it carried) can escape the span.
+        let span = md_code_span("foo\n## evil\n- fake");
+        assert!(!span.contains('\n'), "no newline in span: {span}");
+        assert_eq!(span, "`foo ## evil - fake`");
+        // A backtick-bearing multiline value is fenced AND single-lined.
+        let span2 = md_code_span("echo\n`whoami`");
+        assert!(!span2.contains('\n'), "no newline in backtick span: {span2}");
+        assert!(span2.starts_with("`` ") && span2.ends_with(" ``"));
     }
 }

@@ -9,6 +9,15 @@ use crate::util::{md_code_span, md_indent_continuation, md_single_line, truncate
 
 const SUMM_MAX: usize = 200;
 
+/// Continuation indent for a multiline field directly under a top-level `- `
+/// bullet (content column 2). `safe_continuation_indent(2) == 6`: 6 spaces put
+/// a forged block marker at relative column 4, past CommonMark's 0..3 window,
+/// so a multiline summary can never forge a heading/bullet/fence here.
+const INDENT_TOP: &str = "      ";
+/// Continuation indent for a multiline field under a `  - ` sub-bullet
+/// (content column 4). `safe_continuation_indent(4) == 8`.
+const INDENT_SUB: &str = "        ";
+
 pub fn render_markdown(scope: &RepoScope, events: &[Event]) -> String {
     // Sort by id (≈ chronological) so output is independent of input order.
     let mut events: Vec<&Event> = events.iter().collect();
@@ -54,7 +63,7 @@ pub fn render_markdown(scope: &RepoScope, events: &[Event]) -> String {
             out.push_str(&format!(
                 "- **{}** {}\n",
                 md_single_line(&e.id),
-                md_indent_continuation(&truncate(&e.summary, SUMM_MAX), "  ")
+                md_indent_continuation(&truncate(&e.summary, SUMM_MAX), INDENT_TOP)
             ));
             let mut bits: Vec<String> = Vec::new();
             if let Some(a) = &e.context.agent {
@@ -75,13 +84,13 @@ pub fn render_markdown(scope: &RepoScope, events: &[Event]) -> String {
             if let Some(h) = &e.hypothesis {
                 out.push_str(&format!(
                     "  - hypothesis: {}\n",
-                    md_indent_continuation(&truncate(h, SUMM_MAX), "    ")
+                    md_indent_continuation(&truncate(h, SUMM_MAX), INDENT_SUB)
                 ));
             }
             if let Some(fx) = &e.suggested_fix {
                 out.push_str(&format!(
                     "  - fix: {}\n",
-                    md_indent_continuation(&truncate(fx, SUMM_MAX), "    ")
+                    md_indent_continuation(&truncate(fx, SUMM_MAX), INDENT_SUB)
                 ));
             }
             if let Some(cat) = &e.category {
@@ -95,7 +104,7 @@ pub fn render_markdown(scope: &RepoScope, events: &[Event]) -> String {
             // consistent with it.
             if e.status.is_terminal() {
                 if let Some(res) = &e.resolution {
-                    let reason = md_indent_continuation(&truncate(&res.reason, SUMM_MAX), "    ");
+                    let reason = md_indent_continuation(&truncate(&res.reason, SUMM_MAX), INDENT_SUB);
                     let mut line = format!("  - resolved: {reason}");
                     if let Some(rf) = &res.ref_ {
                         line.push_str(&format!(" ({})", md_code_span(rf)));
@@ -179,20 +188,27 @@ mod tests {
         let mut e = ev("pc_01K000000000000000000000F", Status::Open, "real");
         e.summary = "real\n## open (99)\n- fake peer event".into();
         let md = render_markdown(&RepoScope::All, std::slice::from_ref(&e));
-        // No line begins at column 0 with the forged heading or item.
+        // The summary renders under a `- ` bullet (content column 2). A forged
+        // block marker on a continuation line must land at relative column >= 4
+        // (absolute >= 6) so CommonMark cannot parse it as a new block — see
+        // `util::safe_continuation_indent`. The byte-0 check alone is not enough
+        // (a 2-space indent passes it yet still forges a heading); assert the
+        // actual safe indent is emitted.
         assert!(
             !md.lines().any(|l| l.starts_with("## open (99)")),
-            "forged heading must not structure the doc: {md}"
+            "forged heading must not start at column 0: {md}"
         );
         assert!(
-            !md.lines().any(|l| l == "- fake peer event"),
-            "forged peer item must not appear at column 0: {md}"
+            md.lines()
+                .any(|l| l.starts_with("      ## open (99)")),
+            "forged heading neutralized by a 6-space (content-col-2 + 4) indent: {md}"
+        );
+        assert!(
+            md.lines()
+                .any(|l| l.starts_with("      - fake peer event")),
+            "forged bullet neutralized by the same 6-space indent: {md}"
         );
         assert!(md.contains("real"), "real summary text present");
-        assert!(
-            md.contains("fake peer"),
-            "forged text kept as data, indented"
-        );
     }
 
     /// The `agent` field is attacker-controllable (`add --agent`); a multiline
@@ -215,9 +231,15 @@ mod tests {
         let mut e = ev("pc_01K000000000000000000000G", Status::Open, "ok");
         e.hypothesis = Some("guess\n## evil".into());
         let md = render_markdown(&RepoScope::All, std::slice::from_ref(&e));
+        // Hypothesis renders under a `  - ` sub-bullet (content column 4); the
+        // safe continuation indent is 8 (4 + 4).
         assert!(
             !md.lines().any(|l| l.starts_with("## evil")),
             "forged heading from hypothesis blocked: {md}"
+        );
+        assert!(
+            md.lines().any(|l| l.starts_with("        ## evil")),
+            "forged heading neutralized by an 8-space (content-col-4 + 4) indent: {md}"
         );
     }
 
