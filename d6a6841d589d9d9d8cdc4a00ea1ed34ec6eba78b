@@ -1,0 +1,13 @@
+# Context
+
+## Background
+Six weeks of local use found stale Codex parsing, lost delayed command results, unsafe instruction-file replacement, weak privacy checks, and a triage pack that hid signal clusters.
+
+## Why this way
+The repair keeps the file store and existing schema version. Optional resolution fields preserve compatibility. Backfill state stays separate from normal sweep state. Reserved triage budgets keep reports and signals visible together.
+
+## Gotchas
+Codex custom output can omit child exit codes. Managed block v3 asks Codex to preserve full command result objects. Doctor reports opaque results that cannot be recovered from recorded logs.
+
+## Validation
+All 210 tests passed. Clippy, rustfmt, and git diff checks passed. The installed doctor check reported healthy.
