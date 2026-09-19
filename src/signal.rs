@@ -143,9 +143,14 @@ pub fn append_signal(harness: &str, session: &str, signal: &Signal) -> anyhow::R
     // O_APPEND: the kernel advances the offset and writes atomically, so two
     // concurrent appenders never overwrite each other's line. write_all loops
     // on short writes so the whole line lands in one logical write.
-    let mut f = OpenOptions::new()
-        .create(true)
-        .append(true)
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut f = options
         .open(&path)
         .with_context(|| format!("open signal file {}", path.display()))?;
     f.write_all(line.as_bytes())
@@ -163,16 +168,29 @@ pub fn read_signals(harness: &str) -> (Vec<Signal>, usize) {
     let Some(dir) = signals_dir(harness) else {
         return (out, 0);
     };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return (out, 0);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (out, 0),
+        Err(_) => return (out, 1),
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
         };
         for line in text.lines() {
             if line.trim().is_empty() {

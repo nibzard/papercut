@@ -95,9 +95,11 @@ Core commands:
 | `papercut doctor` | Verify store permissions, managed blocks intact, adapter/hook wiring live, agent detection working. Deterministic remediation hints. |
 | `papercut sweep` | Parse harness session logs since last sweep; extract failure signals into the store. |
 | `papercut triage-pack` | Emit a self-contained markdown bundle (open events, signal clusters grouped by failing program and verb subcommand with recurrence counts and a modal sample) for any agent to triage. |
+| `papercut close` | Record a verified terminal status, reason, reference, remedy class, and resolution time. |
+| `papercut stats` | Show status counts, remedy counts, and median resolution time. |
 
-Deferred until hand-editing hurts twice: `close`, `promote`, `dedupe` as commands —
-status changes are edits to one JSON field, and `render` picks them up.
+`promote` and `dedupe` remain deferred as commands. Direct event-file edits remain
+valid for compatibility.
 
 ### Central store
 
@@ -131,7 +133,12 @@ Event schema (v1):
     "session": "<harness session id if available>",
     "task": "<optional ticket/PRD ref>"
   },
-  "resolution": { "reason": "...", "ref": "<commit sha | issue url | dotfiles ref>" }
+  "resolution": {
+    "reason": "...",
+    "ref": "<commit sha | issue url | dotfiles ref>",
+    "resolved_at": "<optional RFC 3339 timestamp>",
+    "remedy": "<optional remedy class>"
+  }
 }
 ```
 
@@ -140,8 +147,8 @@ high-volume **Layer 1 signal** schema to `signals/<harness>/` (one-file-per-even
 balloon `events/`, which is reserved for reports); a signal cluster is promoted into a
 `candidate` event (`source: "sweep"`, lower trust than an in-the-moment report) at triage
 time, never in the capture path. Every terminal status requires a `resolution.reason`;
-`fixed` requires a `ref`. No env-var values, transcripts, source files, or secrets in
-events — SHA, relative cwd, task id, agent, timestamp suffice.
+`fixed` requires a `ref`. Do not put secrets in events. Command and error fields can
+contain values typed by a caller, so owner-only store permissions are required.
 
 Signal schema (deliberately dumb):
 
@@ -162,13 +169,13 @@ For each detected harness, upsert this block into its **global** instructions fi
 (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, OpenCode's global config, …):
 
 ```markdown
-<!-- papercut:begin v2 -->
+<!-- papercut:begin v3 -->
 ### Log papercuts
 When a repo-specific tool, command, setup step, error message, path convention, cache, or undocumented assumption causes an avoidable retry or dead end, record it immediately:
 
     papercut add "<what you were doing, what got in the way, any verified workaround>" --hypothesis "<optional why>" --fix "<optional proposed fix>"
 
-One or two sentences. Facts first; causes and fixes are optional. One report per apparent root cause per session. Do not log ordinary debugging, accomplishments, product bugs, security issues, or feature requests. If unsure whether it qualifies, log it — triage is cheap. Logging must never interrupt or fail the task. Put flags after the message; if the message itself begins with a dash, put every flag first, then `--`, then the message, e.g. `papercut add --hypothesis "<why>" -- "<-y flag>"`.
+One or two sentences. Facts first; causes and fixes are optional. One report per apparent root cause per session. Do not log ordinary debugging, accomplishments, product bugs, security issues, or feature requests. If unsure whether it qualifies, log it — triage is cheap. Logging must never interrupt or fail the task. Put flags after the message; if the message itself begins with a dash, put every flag first, then `--`, then the message, e.g. `papercut add --hypothesis "<why>" -- "<-y flag>"`. In Codex `functions.exec` scripts, pass each `exec_command` result object to `text(...)`. Do not pass only its `output` field. The full object preserves `exit_code` for the sweep adapter.
 <!-- papercut:end -->
 ```
 
@@ -202,8 +209,8 @@ documented prompt/skill executed in any agent, fed by `papercut triage-pack`:
    **fix at system level** (dotfiles, global instructions, global tool) / promote to
    repo issue / dismiss. Cross-repo recurrence is the tell for system-level fixes —
    the central store is the only vantage point that can see it.
-5. Apply small, low-risk fixes in-session with human approval; close events with a
-   resolution ref; regenerate projections.
+5. Apply fixes within the approved task scope. Close events with `papercut close`.
+   Regenerate projections.
 
 Health metrics (never use raw report count as an agent-quality metric):
 recurrence-after-fix, median time report→resolution, share resolved by docs/wrapper/
@@ -240,12 +247,135 @@ e2e check — a friction-reporting tool must score well on agent-friction benchm
   degrades to no-op with a warning; fixture transcripts → expected signals.
 
 ### Phase 4 — triage, shaped by real data
-- `triage-pack`; the triage prompt/skill; only now consider `close`/`promote`
-  commands if hand-editing has actually hurt.
+- `triage-pack` and the triage prompt/skill. Consider `close` and `promote`
+  commands only if hand-editing hurts.
 - Wait ~2 weeks of real use between Phase 2/3 and this — the pack format should be
   dictated by what actually accumulated, not designed in advance.
 
+### Phase 5 — repairs from sustained use (agreed 2026-09-19)
+
+Six weeks of local use produced 273 reports but only one recorded closure. The
+manual status-edit workflow has therefore hurt more than twice. Current Codex log
+formats also moved beyond the original adapter. The following work is now in scope:
+
+- Add a `close` command for terminal status, reason, reference, remedy class, and
+  resolution time. Keep direct JSON edits valid for compatibility.
+- Parse verified Codex `custom_tool_call` / `custom_tool_call_output` records and
+  commands that complete through `write_stdin`. Persist running-process state in
+  sweep marks. Add an explicit, one-time current-format backfill that does not
+  re-emit legacy direct-call signals.
+- Make adapter coverage and sweep freshness visible in `doctor`. An installed
+  adapter is healthy only when its verified record formats are understood.
+- Preserve instruction-file symlinks and existing permissions during managed-block
+  writes. A shared global instructions target must remain shared.
+- Give reports and signals reserved space in `triage-pack`. Add time and page
+  controls, include enough bounded context to make a decision, and return the
+  included records in JSON output.
+- Use one normalized repo comparison for reports and signals. Prefer repository
+  metadata recorded by a harness over a later lookup in a possibly deleted cwd.
+- Report store and signal read failures. `doctor` checks owner-only permissions on
+  the private store and offers an explicit repair command.
+- Describe command and output capture accurately: these fields can contain values
+  typed by the caller. The private store and owner-only permissions are the primary
+  safeguards; automatic secret rewriting remains out of scope.
+
+Resolution health needs data in the event itself. Optional v1 fields
+`resolution.resolved_at` and `resolution.remedy` are backward-compatible additions.
+The supported remedy values are `docs`, `wrapper`, `earlier_validation`,
+`better_error`, `pinned_dep`, `system_level`, `promote`, and `dismiss`.
+
+## Data retention (prune + vacuum) — designed, deferred
+
+Retention keeps the store bounded over time: old signals and closed events age out
+so the triage window stays readable and disk does not fill. The design below is
+settled. It is **not built yet.** It defers under the same rule as the Non-goals
+list — until plain files hurt — and the measured store (7.5 MB on a 146 GB disk;
+`events/` at 24 KB / 34 files, measured 2026-08) has not hurt. When it does, build
+the minimal slice first and hold the rest.
+
+### Hard rules (hold in any build)
+
+- **Retention is maintenance, never capture.** It never runs on the capture path.
+  The `_hook` entry point is intercepted in `main.rs` before clap parses argv, so
+  the hook — the one path that must stay silent and always exit 0 — cannot reach
+  prune. `add` is excluded from any automatic trigger for the same reason.
+- **Open and candidate events are never pruned,** regardless of age. They are
+  active evidence. `status.is_terminal()` (`fixed` / `promoted` / `duplicate` /
+  `dismissed`) is the single gate for event deletion.
+- **Unknown age means keep.** `parse_rfc3339_unix` returns `Some(0)` (an epoch
+  clamp), not `None`, for corrupt or pre-epoch timestamps. A keep rule that only
+  checks `None` treats a bad timestamp as ~56 years old and mass-evicts in one
+  pass. Treat both `None` and `Some(0)` as keep.
+- **Boring crates only.** `clap`, `serde`, `anyhow`, `std::fs`. No async, no
+  daemon, no scheduler thread, no lock crate. Automatic timing comes from outside
+  the process (cron) or a lazy check on non-capture invocations.
+- **Duplicates are evidence.** Age-based pruning at maintenance time is allowed;
+  capture-time dedup or discard never is. Retention narrows the recall floor over
+  a window. It does not fingerprint or dedupe at capture.
+
+### The minimal build (when plain files hurt)
+
+One subcommand, cron-driven, non-interactive. It is a strict generalization of the
+`sweep` model: periodic, idempotent, re-runnable, honest exit codes, atomic writes.
+
+| Command | Purpose |
+| --- | --- |
+| `papercut prune [--dry-run] [--signals-days N] [--terminal-events-days N]` | Expire old data by age. Never deletes open or candidate events. |
+
+- **Events:** delete terminal events older than `--terminal-events-days`
+  (default 365). One file per event, write-once, never appended. No atomic dance,
+  no concurrency hazard.
+- **Signals:** whole-file removal when a file's newest line is older than
+  `--signals-days` (default 90). O(files), zero JSON parsing, and a live file has
+  `mtime` close to now so it is never eligible. No per-line rewrite (see below).
+- **`--dry-run`** plans everything, mutates nothing, exits 0, and prints the plan
+  in text and `--output json`.
+- **Automatic expiry is a documented cron line,** for example
+  `17 3 * * * $HOME/.local/bin/papercut prune`. `install` does not write it —
+  crontab, systemd, and launchd formats drift, and auto-wiring would violate the
+  degrade-silently rule. The line lives in `prune --help` and here.
+- **Observability backstop:** a successful prune writes `data_root/.last_prune`,
+  and `doctor` reports the age since the last prune and prints the cron hint when
+  stale. This turns a silent no-cron state into a visible signal at the next
+  `doctor` run, without adding maintenance to every command.
+
+The build reuses the existing primitives: `write_atomic` for state, `now_unix`
+and `parse_rfc3339_unix` for age, `safe_segment` to keep prune inside `signals/`,
+and the sweep's own `mark.files.retain` dead-mark predicate. Exit codes follow the
+contract: 0 for success and dry-run, 1 when a deletion could not complete (partial
+counts ride in `data`), 2 for usage errors.
+
+### Deliberately deferred (do not build without re-agreement)
+
+- **Lazy auto-prune on read commands.** A `maybe_auto_prune()` at the top of
+  `app::run`, gated by a min-interval and swallowing errors, gives automatic
+  expiry without cron — but it adds the first maintenance-failure surface to read
+  commands (`list`, `render`, `triage-pack`) that today cannot be touched by
+  maintenance logic, and a broken state-file write re-runs the bounded prune on
+  every later invocation. Hold until the cron line proves insufficient.
+- **Per-line signal rewrite or vacuum.** Rewriting a JSONL file without expired
+  lines reclaims more space than whole-file removal, but it adds the first
+  data-loss path in a system whose premise is evidence preservation: the
+  rename-versus-O_APPEND race. `write_atomic` writes the full compacted temp file
+  over milliseconds between the size check and the rename, and a hook appending in
+  that window writes to the unlinked inode and loses the line. The `mtime` stale
+  guard shrinks the window. It does not close it. Not worth it under no disk
+  pressure.
+- **An archive tier.** `read_all_events` scans only `events/`. Without a
+  `list --include-archived` read path, archiving is a slow delete, not a
+  reversible one.
+- **sweeps.json compaction.** Already self-bounding. `codex::sweep` drops
+  watermarks for deleted session files on every run. A separate vacuum is
+  redundant and races a concurrent `sweep`.
+- **`--signals-days 0` or `--terminal-events-days 0` as never-expire.** The
+  existing `--since 0` means now (keep nothing). Reusing 0 to mean infinity in
+  prune traps users. Use a distinct sentinel or refuse 0.
+
 ## Non-goals (deferred until plain files hurt)
+
+Retention (prune + vacuum) is not a non-goal. It is designed and deferred on the
+same bar — see the *Data retention* section above. The items below are things we
+may never build.
 
 - MCP server / daemon — a CLI on PATH already works in every harness; MCP means a
   daemon plus per-harness config in N places.

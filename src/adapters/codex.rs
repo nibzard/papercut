@@ -45,6 +45,81 @@ pub struct SweepOutcome {
     pub watermark_error: Option<String>,
 }
 
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct CoverageProbe {
+    pub supported_exec_records: usize,
+    pub unsupported_exec_records: usize,
+    pub observable_custom_results: usize,
+    pub opaque_custom_results: usize,
+}
+
+/// Inspect a bounded tail of recent logs for execution record shapes. This is
+/// a diagnostic only. It never changes sweep state.
+pub fn coverage_probe() -> CoverageProbe {
+    let Some(root) = sessions_root() else {
+        return CoverageProbe::default();
+    };
+    let mut files = collect_jsonl(&root);
+    files.sort_by_key(|path| {
+        std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    });
+    let mut coverage = CoverageProbe::default();
+    for path in files.into_iter().rev().take(16) {
+        let Ok(mut file) = std::fs::File::open(path) else {
+            continue;
+        };
+        let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        let start = len.saturating_sub(256 * 1024);
+        if file.seek(SeekFrom::Start(start)).is_err() {
+            continue;
+        }
+        let mut text = String::new();
+        if file.read_to_string(&mut text).is_err() {
+            continue;
+        }
+        let mut custom_calls = std::collections::BTreeSet::new();
+        for line in text.lines().skip(usize::from(start > 0)) {
+            let Ok(record) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            let Some(payload) = record.get("payload") else {
+                continue;
+            };
+            let record_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
+            let name = payload.get("name").and_then(Value::as_str).unwrap_or("");
+            match (record_type, name) {
+                ("function_call", "exec_command" | "write_stdin")
+                | ("custom_tool_call", "exec") => coverage.supported_exec_records += 1,
+                ("function_call", "exec") | ("custom_tool_call", "exec_command") => {
+                    coverage.unsupported_exec_records += 1;
+                }
+                _ => {}
+            }
+            if record_type == "custom_tool_call" && name == "exec" {
+                if let Some(call_id) = payload.get("call_id").and_then(Value::as_str) {
+                    custom_calls.insert(call_id.to_string());
+                }
+            } else if record_type == "custom_tool_call_output" {
+                let Some(call_id) = payload.get("call_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                if !custom_calls.remove(call_id) {
+                    continue;
+                }
+                let output = output_text(payload.get("output"));
+                if parse_json_exit_results(&output).is_empty() {
+                    coverage.opaque_custom_results += 1;
+                } else {
+                    coverage.observable_custom_results += 1;
+                }
+            }
+        }
+    }
+    coverage
+}
+
 /// Sweep new Codex session content since the last run, appending signals.
 /// Idempotent across runs via per-file byte-offset high-water marks.
 ///
@@ -62,6 +137,23 @@ pub struct SweepOutcome {
 ///   a warning: the duplication is bounded to one re-read per shrink event,
 ///   while skipping would lose the new content forever.
 pub fn sweep() -> SweepOutcome {
+    sweep_mode(ParseMode::All)
+}
+
+/// Re-read only record shapes that older adapter versions could not capture.
+/// The separate watermark makes this explicit recovery idempotent without
+/// re-emitting legacy direct-command failures.
+pub fn backfill_current() -> SweepOutcome {
+    sweep_mode(ParseMode::PreviouslyMissed)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParseMode {
+    All,
+    PreviouslyMissed,
+}
+
+fn sweep_mode(mode: ParseMode) -> SweepOutcome {
     let mut out = SweepOutcome {
         harness: HARNESS.into(),
         ..Default::default()
@@ -84,17 +176,52 @@ pub fn sweep() -> SweepOutcome {
     let mut emit_failed = false;
     {
         let mark = sweeps.marks.entry(HARNESS.into()).or_default();
-        // Adopt root-relative watermark keys (see `rel_key`), migrating any
-        // legacy absolute-path keys written by older papercut versions first so
-        // an upgrade never forces a cold re-sweep (and the duplicate signals it
-        // would emit).
-        relativize_legacy_keys(mark, &root);
-        migrate_legacy(mark, &files, &root);
+        if mode == ParseMode::PreviouslyMissed && mark.current_backfill_complete {
+            out.warning = Some("current-format backfill already completed".into());
+            return out;
+        }
+        if mode == ParseMode::All {
+            // Adopt root-relative watermark keys (see `rel_key`), migrating any
+            // legacy absolute-path keys written by older papercut versions first.
+            relativize_legacy_keys(mark, &root);
+            migrate_legacy(mark, &files, &root);
+        }
+
+        let normal_offsets: BTreeMap<String, u64> = mark
+            .files
+            .iter()
+            .map(|(path, file_mark)| (path.clone(), file_mark.offset))
+            .collect();
+        let backfill_offsets: BTreeMap<String, u64> = mark
+            .current_backfill_files
+            .iter()
+            .map(|(path, file_mark)| (path.clone(), file_mark.offset))
+            .collect();
+
+        let file_marks = if mode == ParseMode::PreviouslyMissed {
+            &mut mark.current_backfill_files
+        } else {
+            &mut mark.files
+        };
 
         for file in &files {
             let key = rel_key(file, &root);
-            let fm = mark.files.entry(key).or_default();
-            let len = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+            let scan_limit = if mode == ParseMode::PreviouslyMissed {
+                match normal_offsets.get(&key).copied() {
+                    Some(limit) if limit > 0 => Some(limit),
+                    _ => continue,
+                }
+            } else {
+                None
+            };
+            let suppress_current_before = if mode == ParseMode::All {
+                backfill_offsets.get(&key).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            let fm = file_marks.entry(key).or_default();
+            let real_len = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+            let len = scan_limit.map_or(real_len, |limit| real_len.min(limit));
             if len < fm.offset {
                 // The file shrank: it was truncated or replaced, and the old
                 // content is gone. Re-read from the start; stale pending calls
@@ -106,7 +233,18 @@ pub fn sweep() -> SweepOutcome {
                 continue; // nothing new in this file
             }
 
-            let r = sweep_file(file, fm.offset, &mut fm.pending_calls, &mut fm.session);
+            let r = sweep_file(
+                file,
+                fm.offset,
+                &mut fm.pending_calls,
+                &mut fm.running_processes,
+                &mut fm.session,
+                mode,
+                SweepWindow {
+                    scan_limit,
+                    suppress_current_before,
+                },
+            );
             out.sessions_scanned += 1;
             if r.had_command_event {
                 out.sessions_with_commands += 1;
@@ -131,7 +269,10 @@ pub fn sweep() -> SweepOutcome {
 
         // Deleted session files leave no zombie marks behind. Keys are
         // root-relative, so reattach the root before the existence check.
-        mark.files.retain(|p, _| root.join(p).exists());
+        file_marks.retain(|p, _| root.join(p).exists());
+        if mode == ParseMode::PreviouslyMissed && !emit_failed {
+            mark.current_backfill_complete = true;
+        }
     }
 
     out.emit_failed = emit_failed;
@@ -193,6 +334,7 @@ fn migrate_legacy(mark: &mut SweepMark, files: &[PathBuf], root: &Path) {
                         offset: mark.last_offset,
                         pending_calls: std::mem::take(&mut mark.pending_calls),
                         session: mark.last_session.take(),
+                        ..Default::default()
                     },
                 );
             }
@@ -247,11 +389,20 @@ struct FileResult {
     emit_failed: bool,
 }
 
+#[derive(Clone, Copy)]
+struct SweepWindow {
+    scan_limit: Option<u64>,
+    suppress_current_before: u64,
+}
+
 fn sweep_file(
     path: &Path,
     offset: u64,
     pending: &mut BTreeMap<String, PendingCall>,
+    running: &mut BTreeMap<String, PendingCall>,
     session: &mut Option<SessionCtx>,
+    mode: ParseMode,
+    window: SweepWindow,
 ) -> FileResult {
     let empty = FileResult {
         emitted: 0,
@@ -273,12 +424,19 @@ fn sweep_file(
         Ok(m) => m.len(),
         Err(_) => return empty,
     };
-    let seek_to = offset.min(real_len);
+    let scan_len = window
+        .scan_limit
+        .map_or(real_len, |limit| real_len.min(limit));
+    let seek_to = offset.min(scan_len);
     if file.seek(SeekFrom::Start(seek_to)).is_err() {
         return empty;
     }
     let mut bytes = Vec::new();
-    if file.read_to_end(&mut bytes).is_err() {
+    if file
+        .take(scan_len.saturating_sub(seek_to))
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
         return empty;
     }
 
@@ -318,7 +476,7 @@ fn sweep_file(
     // Cap at the real file length: a synthetic trailing newline (a complete
     // record that lacked its own terminator) must not advance the watermark past
     // the true end, or the next sweep would see `len < offset` and false-shrink.
-    let default_offset = (offset + last_nl as u64 + 1).min(real_len);
+    let default_offset = (offset + last_nl as u64 + 1).min(scan_len);
 
     let mut emitted = 0usize;
     let mut had_command_event = false;
@@ -382,6 +540,16 @@ fn sweep_file(
                         {
                             sc.git_sha = Some(g.to_string());
                         }
+                        if let Some(repository_url) = p
+                            .get("git")
+                            .and_then(|git| git.get("repository_url"))
+                            .and_then(|value| value.as_str())
+                        {
+                            let normalized = crate::git_meta::normalize_remote(repository_url);
+                            if !normalized.is_empty() {
+                                sc.repo = Some(normalized);
+                            }
+                        }
                     }
                 } else if ttype == "response_item" {
                     if let Some(p) = o.get("payload") {
@@ -394,8 +562,26 @@ fn sweep_file(
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            if let Some(cmd) = extract_cmd(p) {
-                                pending.insert(call_id, PendingCall { cmd, ts });
+                            let name = p.get("name").and_then(|value| value.as_str()).unwrap_or("");
+                            if name == "exec_command" {
+                                if let Some(cmd) = extract_cmd(p) {
+                                    pending.insert(
+                                        call_id,
+                                        PendingCall {
+                                            cmd,
+                                            ts,
+                                            commands: Vec::new(),
+                                            process_id: None,
+                                        },
+                                    );
+                                }
+                            } else if name == "write_stdin" {
+                                if let Some(process_id) = extract_process_id(p) {
+                                    if let Some(mut call) = running.get(&process_id).cloned() {
+                                        call.process_id = Some(process_id);
+                                        pending.insert(call_id, call);
+                                    }
+                                }
                             }
                         } else if pt == "function_call_output" {
                             had_command_event = true;
@@ -404,12 +590,27 @@ fn sweep_file(
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            let output = p.get("output").and_then(|v| v.as_str()).unwrap_or("");
+                            let output = output_text(p.get("output"));
                             if let Some(pc) = pending.remove(&call_id) {
-                                if let Some(exit) = parse_exit(output) {
-                                    if exit != 0 {
+                                if let Some(process_id) = parse_running_session(&output) {
+                                    running.insert(process_id, pc);
+                                } else if let Some(exit) = parse_exit(&output) {
+                                    if let Some(process_id) = &pc.process_id {
+                                        running.remove(process_id);
+                                    }
+                                    let current_record = pc.process_id.is_some();
+                                    let should_emit = exit != 0
+                                        && match mode {
+                                            ParseMode::All => {
+                                                !current_record
+                                                    || line_start_abs
+                                                        >= window.suppress_current_before
+                                            }
+                                            ParseMode::PreviouslyMissed => current_record,
+                                        };
+                                    if should_emit {
                                         let (session_id, cwd, repo) = session_tuple(session);
-                                        let head = extract_output_head(output);
+                                        let head = extract_output_head(&output);
                                         let sig = Signal::new(
                                             pc.ts.clone(),
                                             repo,
@@ -445,6 +646,82 @@ fn sweep_file(
                             }
                             // No pending call for this id: an orphan output
                             // (e.g. call seen before our first sweep) — ignore.
+                        } else if pt == "custom_tool_call" {
+                            recognized = true;
+                            had_command_event = true;
+                            if p.get("name").and_then(|value| value.as_str()) == Some("exec") {
+                                let call_id = p
+                                    .get("call_id")
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let commands = extract_custom_exec_commands(p);
+                                let cmd = commands
+                                    .first()
+                                    .cloned()
+                                    .unwrap_or_else(|| "functions.exec".into());
+                                pending.insert(
+                                    call_id,
+                                    PendingCall {
+                                        cmd,
+                                        ts,
+                                        commands,
+                                        process_id: None,
+                                    },
+                                );
+                            }
+                        } else if pt == "custom_tool_call_output" {
+                            recognized = true;
+                            had_command_event = true;
+                            let call_id = p
+                                .get("call_id")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let output = output_text(p.get("output"));
+                            if let Some(pc) = pending.remove(&call_id) {
+                                if mode == ParseMode::All
+                                    && line_start_abs < window.suppress_current_before
+                                {
+                                    cursor += line_len;
+                                    line_start_abs += line_len as u64;
+                                    continue;
+                                }
+                                let results = parse_json_exit_results(&output);
+                                for (index, (exit, head)) in results.into_iter().enumerate() {
+                                    if exit == 0 {
+                                        continue;
+                                    }
+                                    let cmd = pc
+                                        .commands
+                                        .get(index)
+                                        .map(String::as_str)
+                                        .unwrap_or(&pc.cmd);
+                                    let (session_id, cwd, repo) = session_tuple(session);
+                                    let sig = Signal::new(
+                                        pc.ts.clone(),
+                                        repo,
+                                        cwd,
+                                        Some(HARNESS.into()),
+                                        cmd,
+                                        exit,
+                                        Some(&head),
+                                        Some(session_id.clone()),
+                                    );
+                                    let file_id = crate::signal::filename_session(&session_id);
+                                    if append_signal(HARNESS, &file_id, &sig).is_ok() {
+                                        emitted += 1;
+                                    } else {
+                                        pending.insert(call_id.clone(), pc.clone());
+                                        emit_failed = true;
+                                        fail_offset = Some(line_start_abs);
+                                        break;
+                                    }
+                                }
+                                if emit_failed {
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
@@ -489,6 +766,151 @@ fn session_tuple(session: &Option<SessionCtx>) -> (String, Option<String>, Optio
 fn resolve_repo(cwd: Option<&str>) -> Option<String> {
     let cwd = cwd?;
     crate::git_meta::repo_of(Path::new(cwd))
+}
+
+fn output_text(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn extract_process_id(payload: &Value) -> Option<String> {
+    let arguments = payload.get("arguments")?.as_str()?;
+    let parsed: Value = serde_json::from_str(arguments).ok()?;
+    match parsed.get("session_id")? {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn parse_running_session(output: &str) -> Option<String> {
+    const NEEDLE: &str = "Process running with session ID ";
+    let rest = output.split_once(NEEDLE)?.1;
+    let id: String = rest
+        .chars()
+        .take_while(|character| character.is_ascii_alphanumeric() || *character == '-')
+        .collect();
+    (!id.is_empty()).then_some(id)
+}
+
+fn extract_custom_exec_commands(payload: &Value) -> Vec<String> {
+    let Some(input) = payload.get("input").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    let mut commands = Vec::new();
+    let mut remaining = input;
+    const NEEDLE: &str = "tools.exec_command";
+    while let Some(index) = remaining.find(NEEDLE) {
+        let after = &remaining[index + NEEDLE.len()..];
+        let boundary = after.find("tools.").unwrap_or(after.len());
+        let call = &after[..boundary];
+        if let Some(command) = extract_js_string_property(call, "cmd") {
+            commands.push(truncate(&command, CMD_MAX));
+        }
+        remaining = &after[boundary..];
+        if boundary == after.len() {
+            break;
+        }
+    }
+    commands
+}
+
+fn extract_js_string_property(source: &str, key: &str) -> Option<String> {
+    let unquoted = format!("{key}:");
+    let quoted = format!("\"{key}\":");
+    let start = source
+        .find(&unquoted)
+        .map(|index| index + unquoted.len())
+        .or_else(|| source.find(&quoted).map(|index| index + quoted.len()))?;
+    let text = source[start..].trim_start();
+    let quote = text.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let mut escaped = false;
+    let mut end = None;
+    for (index, character) in text.char_indices().skip(1) {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == quote {
+            end = Some(index + character.len_utf8());
+            break;
+        }
+    }
+    let literal = &text[..end?];
+    if quote == '"' {
+        serde_json::from_str(literal).ok()
+    } else {
+        let inner = &literal[1..literal.len() - 1];
+        Some(
+            inner
+                .replace("\\'", "'")
+                .replace("\\\\", "\\")
+                .replace("\\n", "\n")
+                .replace("\\r", "\r")
+                .replace("\\t", "\t"),
+        )
+    }
+}
+
+fn parse_json_exit_results(output: &str) -> Vec<(i32, String)> {
+    // Current tool output can contain several text blocks. Status text can
+    // precede the JSON result, including another empty `Output:` section.
+    // Try each object or array boundary and accept the first JSON value that
+    // contains command results.
+    for (index, character) in output.char_indices() {
+        if !matches!(character, '{' | '[') {
+            continue;
+        }
+        let mut stream = serde_json::Deserializer::from_str(&output[index..]).into_iter::<Value>();
+        let Some(Ok(value)) = stream.next() else {
+            continue;
+        };
+        let mut results = Vec::new();
+        collect_exit_results(&value, &mut results);
+        if !results.is_empty() {
+            return results;
+        }
+    }
+    Vec::new()
+}
+
+fn collect_exit_results(value: &Value, results: &mut Vec<(i32, String)>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(exit) = object
+                .get("exit_code")
+                .and_then(Value::as_i64)
+                .and_then(|value| i32::try_from(value).ok())
+            {
+                let head = object
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .map(extract_output_head)
+                    .unwrap_or_default();
+                results.push((exit, head));
+                return;
+            }
+            for child in object.values() {
+                collect_exit_results(child, results);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_exit_results(item, results);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn extract_cmd(p: &Value) -> Option<String> {

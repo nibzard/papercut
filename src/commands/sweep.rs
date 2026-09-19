@@ -19,7 +19,11 @@ pub fn run(args: SweepArgs) -> RunResult {
     let mut errors: Vec<ErrorItem> = Vec::new();
     let mut total = 0usize;
     if want_codex {
-        let o = crate::adapters::codex::sweep();
+        let o = if args.backfill_current {
+            crate::adapters::codex::backfill_current()
+        } else {
+            crate::adapters::codex::sweep()
+        };
         total += o.signals_emitted;
         // The CLI path is honest: a signal or watermark that was not persisted
         // is a real failure (exit 1), not a warning inside an ok envelope.

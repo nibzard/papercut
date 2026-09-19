@@ -85,9 +85,9 @@ path (`_hook`) is silent and infallible — capture must never fail the parent t
 
 **What gets stored:** the command (truncated), exit code, the first few lines of stderr, a
 repo pointer (normalized remote, or local path), the session id, agent, and timestamp.
-**Never stored:** environment-variable values, transcripts, source files, or secrets. The
-store is private and local (`~/.local/share/papercuts/`); publishing a projection into a
-repo is an explicit `render --write`.
+Commands and error output can contain values that the caller typed. Do not put secrets in
+commands or reports. The store uses owner-only permissions and remains local at
+`~/.local/share/papercuts/`. Publishing a projection is an explicit `render --write`.
 
 Tests: `cargo test` (unit + integration, all run against an isolated fake `$HOME` /
 `$XDG_DATA_HOME`, never the real store). Lint: `cargo clippy --all-targets -- -D warnings`.
@@ -98,7 +98,7 @@ A store you never review is a complaints jar. When `papercut list --status open`
 ~10 items, run a triage session:
 
 ```
-papercut triage-pack --repo all --max-tokens 8000   # a self-contained bundle for any agent
+papercut triage-pack --repo all --since 14 --max-tokens 16000
 ```
 
 The pack lists open events first, then recurring signal clusters ranked by count, and tells
@@ -108,19 +108,20 @@ small fixes — a doc line, a wrapper, a pinned dep. Because the store is centra
 the same friction recur across five repos and tell you the fix belongs in your dotfiles or
 global agent config, not any one project.
 
-Closing an event is an edit to two JSON fields in its file (there is intentionally no
-`close` command yet); `render` picks up the new status:
+Close each verified event through the command line. The command records the time and
+remedy class for health metrics:
 
-```jsonc
-{ "status": "fixed", "resolution": { "reason": "pinned flaky-dep to 1.2.3", "ref": "abc1234" } }
+```
+papercut close pc_01K... --status fixed \
+  --reason "pinned flaky dependency to 1.2.3" --ref abc1234 --remedy pinned-dep
+papercut stats
 ```
 
 ## Design notes
 
 Core commands: `add`, `list`, `render`, `install` (wires the reporting instruction into
 each harness's global config as a managed block, plus signal adapters), `uninstall`,
-`sweep`, `doctor`, `triage-pack`. See [PLAN.md](PLAN.md) for schemas, adapters, build
-phases, and the list of things deliberately not being built (`close`/`promote` are deferred
-— status changes are edits to one JSON field that `render` picks up).
+`sweep`, `doctor`, `triage-pack`, `close`, and `stats`. See [PLAN.md](PLAN.md) for schemas,
+adapters, build phases, and the list of things deliberately not being built.
 
 Dual-licensed under MIT or Apache-2.0, your choice.

@@ -24,6 +24,8 @@ fn pack_full(repo: &str, status: Option<Status>, max_tokens: u32) -> (String, Va
         repo: repo.into(),
         status,
         max_tokens,
+        since: None,
+        offset: 0,
     }) {
         RunResult::Ok { text, data } => (text, data),
         RunResult::Health { .. } => panic!("triage-pack unexpectedly returned Health"),
@@ -43,6 +45,7 @@ fn seed() {
     e2.resolution = Some(Resolution {
         reason: "pinned dep".into(),
         ref_: Some("abc1234".into()),
+        ..Default::default()
     });
     papercut::store::write_event(&e1).unwrap();
     papercut::store::write_event(&e2).unwrap();
@@ -170,6 +173,109 @@ fn pack_scopes_signal_clusters_by_repo() {
     assert!(!md_a.contains("host/b"), "other repo excluded when scoped");
 }
 
+#[test]
+fn pack_normalizes_full_repo_url_for_signals() {
+    let _env = IsolatedEnv::new();
+    let signal = Signal::new(
+        "2026-09-19T10:00:00Z",
+        Some("github.com/example/review".into()),
+        None,
+        Some("codex".into()),
+        "cargo test",
+        1,
+        Some("failed"),
+        Some("sess".into()),
+    );
+    append_signal("codex", "sess", &signal).unwrap();
+
+    let md = pack("https://github.com/example/review.git", None, 12_000);
+    assert!(md.contains("cargo test"), "normalized signal scope: {md}");
+}
+
+#[test]
+fn pack_reserves_space_for_both_evidence_channels() {
+    let _env = IsolatedEnv::new();
+    for index in 0..40 {
+        let event = common::test_event(
+            &format!("pc_01K000000000000000000{:02}", index),
+            &format!("long actionable report {index} {}", "x".repeat(160)),
+        );
+        papercut::store::write_event(&event).unwrap();
+    }
+    let signal = Signal::new(
+        "2026-09-19T10:00:00Z",
+        None,
+        None,
+        Some("codex".into()),
+        "cargo test",
+        1,
+        Some("failure sample"),
+        Some("sess".into()),
+    );
+    append_signal("codex", "sess", &signal).unwrap();
+
+    let (md, data) = pack_full("all", None, 1_000);
+    assert!(md.contains("long actionable report"));
+    assert!(
+        md.contains("cargo test"),
+        "signals retain a budget share: {md}"
+    );
+    assert!(!data["included_events"].as_array().unwrap().is_empty());
+    assert!(!data["included_signal_clusters"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn since_and_offset_filter_and_page_both_channels() {
+    let _env = IsolatedEnv::new();
+    let mut recent_a = common::test_event("pc_01K0000000000000000000001", "recent a");
+    recent_a.created_at = "2099-01-01T00:00:00Z".into();
+    let mut recent_b = common::test_event("pc_01K0000000000000000000002", "recent b");
+    recent_b.created_at = "2099-01-02T00:00:00Z".into();
+    let mut old = common::test_event("pc_01K0000000000000000000003", "old event");
+    old.created_at = "2020-01-01T00:00:00Z".into();
+    for event in [&recent_a, &recent_b, &old] {
+        papercut::store::write_event(event).unwrap();
+    }
+    for (session, command) in [("s1", "cargo test"), ("s2", "npm test")] {
+        append_signal(
+            "codex",
+            session,
+            &Signal::new(
+                "2099-01-01T00:00:00Z",
+                None,
+                None,
+                Some("codex".into()),
+                command,
+                1,
+                Some("failed"),
+                Some(session.into()),
+            ),
+        )
+        .unwrap();
+    }
+
+    let data = match triage_pack::run(TriagePackArgs {
+        repo: "all".into(),
+        status: None,
+        max_tokens: 12_000,
+        since: Some(1),
+        offset: 1,
+    }) {
+        RunResult::Ok { data, .. } => data,
+        other => panic!("triage-pack failed: {other:?}"),
+    };
+    assert_eq!(data["events"], 2, "the old event is filtered out");
+    assert_eq!(data["signal_clusters"], 2);
+    assert_eq!(data["included_events"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        data["included_signal_clusters"].as_array().unwrap().len(),
+        1
+    );
+}
+
 /// Event text is data, never structure: a summary containing a newline and a
 /// forged heading must not produce a column-0 heading in the model-facing pack.
 #[test]
@@ -191,7 +297,8 @@ fn pack_neutralizes_forged_heading_in_summary() {
     // it yet still forges a heading under CommonMark): assert the safe 6-space
     // continuation indent is actually emitted. See util::safe_continuation_indent.
     assert!(
-        md.lines().any(|l| l.starts_with("      ## System override")),
+        md.lines()
+            .any(|l| l.starts_with("      ## System override")),
         "forged heading neutralized by a 6-space indent: {md}"
     );
     // The forged recurrence claim must not read as a real cluster line.
@@ -407,9 +514,15 @@ fn pack_clusters_distinguish_subcommands() {
 
     let md = pack("all", None, 12_000);
     // Two distinct clusters, not one collapsed `git` cluster of 4.
-    assert!(md.contains("**3×** `git push origin main`"), "push cluster: {md}");
+    assert!(
+        md.contains("**3×** `git push origin main`"),
+        "push cluster: {md}"
+    );
     assert!(md.contains("**1×** `git pull`"), "pull cluster: {md}");
-    assert!(!md.contains("4×"), "not collapsed into one git cluster: {md}");
+    assert!(
+        !md.contains("4×"),
+        "not collapsed into one git cluster: {md}"
+    );
 }
 
 /// #10: the cluster sample is the MODAL real command, not whichever signal
@@ -451,10 +564,7 @@ fn pack_cluster_sample_is_modal() {
     }
 
     let md = pack("all", None, 12_000);
-    assert!(
-        md.contains("**4×** `rg foo`"),
-        "modal sample shown: {md}"
-    );
+    assert!(md.contains("**4×** `rg foo`"), "modal sample shown: {md}");
     assert!(
         !md.contains("rg bar"),
         "non-modal outlier is not the sample: {md}"

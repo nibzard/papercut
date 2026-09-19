@@ -101,7 +101,7 @@ pub fn load(f: &Filters) -> (Vec<Event>, Vec<SkippedFile>) {
 /// Does a stored `repo` id match a `--repo` filter? A literal match covers
 /// local-path repos (stored as the toplevel path); a normalized match covers
 /// remote URLs the user may have pasted verbatim (`https://…/foo/bar.git`).
-fn repo_matches(repo: &str, filter: &str, norm_filter: Option<&str>) -> bool {
+pub(crate) fn repo_matches(repo: &str, filter: &str, norm_filter: Option<&str>) -> bool {
     repo == filter || norm_filter.is_some_and(|n| repo == n)
 }
 

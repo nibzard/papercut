@@ -104,7 +104,8 @@ pub fn render_markdown(scope: &RepoScope, events: &[Event]) -> String {
             // consistent with it.
             if e.status.is_terminal() {
                 if let Some(res) = &e.resolution {
-                    let reason = md_indent_continuation(&truncate(&res.reason, SUMM_MAX), INDENT_SUB);
+                    let reason =
+                        md_indent_continuation(&truncate(&res.reason, SUMM_MAX), INDENT_SUB);
                     let mut line = format!("  - resolved: {reason}");
                     if let Some(rf) = &res.ref_ {
                         line.push_str(&format!(" ({})", md_code_span(rf)));
@@ -175,6 +176,7 @@ mod tests {
         e.resolution = Some(Resolution {
             reason: "pinned dep".into(),
             ref_: Some("abc1234".into()),
+            ..Default::default()
         });
         let md = render_markdown(&RepoScope::All, std::slice::from_ref(&e));
         assert!(md.contains("resolved: pinned dep (`abc1234`)"));
@@ -199,13 +201,11 @@ mod tests {
             "forged heading must not start at column 0: {md}"
         );
         assert!(
-            md.lines()
-                .any(|l| l.starts_with("      ## open (99)")),
+            md.lines().any(|l| l.starts_with("      ## open (99)")),
             "forged heading neutralized by a 6-space (content-col-2 + 4) indent: {md}"
         );
         assert!(
-            md.lines()
-                .any(|l| l.starts_with("      - fake peer event")),
+            md.lines().any(|l| l.starts_with("      - fake peer event")),
             "forged bullet neutralized by the same 6-space indent: {md}"
         );
         assert!(md.contains("real"), "real summary text present");
@@ -255,6 +255,7 @@ mod tests {
         e.resolution = Some(Resolution {
             reason: "previously fixed".into(),
             ref_: Some("deadbeef".into()),
+            ..Default::default()
         });
         let md = render_markdown(&RepoScope::All, std::slice::from_ref(&e));
         assert!(md.contains("## open"), "still grouped under open: {md}");

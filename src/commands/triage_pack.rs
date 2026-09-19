@@ -23,6 +23,7 @@ pub fn run(args: TriagePackArgs) -> RunResult {
 
     let (mut events, skipped) = crate::query::load(&Filters {
         scope: scope.clone(),
+        since_days: args.since,
         ..Default::default()
     });
     // Default triage focus: open + candidate. An explicit --status overrides.
@@ -33,45 +34,87 @@ pub fn run(args: TriagePackArgs) -> RunResult {
 
     // F6: cluster only the signals that fall under the same repo scope, so a
     // `--repo .` pack does not pull in recurrence from unrelated repositories.
-    let clusters = cluster_signals(&scope);
-    let md = build_pack(&scope, &events, &clusters, &skipped, args.max_tokens);
+    events.reverse();
+    let (clusters, signal_read_errors) = cluster_signals(&scope, args.since);
+    let event_page: Vec<Event> = events.iter().skip(args.offset).cloned().collect();
+    let cluster_page: Vec<Cluster> = clusters.iter().skip(args.offset).cloned().collect();
+    let built = build_pack(
+        &scope,
+        &event_page,
+        &cluster_page,
+        &skipped,
+        signal_read_errors,
+        args.max_tokens,
+    );
 
     RunResult::Ok {
         data: json!({
-            "bytes": md.len(),
+            "bytes": built.markdown.len(),
             "events": events.len(),
             "signal_clusters": clusters.len(),
+            "offset": args.offset,
+            "since_days": args.since,
+            "included_events": built.events,
+            "included_signal_clusters": built.clusters,
+            "signal_read_errors": signal_read_errors,
             "skipped": skipped,
         }),
-        text: md,
+        text: built.markdown,
     }
 }
 
+#[derive(Clone, serde::Serialize)]
 struct Cluster {
     key: String,
     /// Distinct real commands seen in this cluster → their counts, used to pick
     /// a modal sample (the most frequent command) so the rendered headline
     /// reflects what actually recurred, not whichever signal sorted first.
+    #[serde(skip)]
     cmds: BTreeMap<String, usize>,
     count: usize,
     repos: BTreeSet<String>,
     agents: BTreeSet<String>,
+    sessions: BTreeSet<String>,
+    first_ts: String,
+    last_ts: String,
+    stderr_sample: Option<String>,
 }
 
-fn cluster_signals(scope: &RepoScope) -> Vec<Cluster> {
+struct PackBuilt {
+    markdown: String,
+    events: Vec<Event>,
+    clusters: Vec<serde_json::Value>,
+}
+
+fn cluster_signals(scope: &RepoScope, since_days: Option<u32>) -> (Vec<Cluster>, usize) {
     let mut map: BTreeMap<String, Cluster> = BTreeMap::new();
+    let mut signal_read_errors = 0usize;
+    let cutoff = since_days
+        .map(|days| crate::time::now_unix().saturating_sub(u64::from(days).saturating_mul(86_400)));
+    let normalized_scope = match scope {
+        RepoScope::One(repo) => Some(crate::git_meta::normalize_remote(repo)),
+        RepoScope::All => None,
+    };
     for h in SIGNAL_HARNESSES {
-        let (sigs, _skip) = read_signals(h);
+        let (sigs, skipped) = read_signals(h);
+        signal_read_errors += skipped;
         for s in sigs {
+            if let Some(cutoff) = cutoff {
+                if crate::time::parse_rfc3339_unix(&s.ts).is_some_and(|time| time < cutoff) {
+                    continue;
+                }
+            }
             // Honor the repo scope: under `One(r)` only signals attributed to
             // that repo cluster. Signals with no repo are unattributable and are
             // excluded from a scoped pack (they still appear under `All`).
             if let RepoScope::One(r) = scope {
-                if s.repo.as_deref() != Some(r.as_str()) {
+                if !s.repo.as_deref().is_some_and(|repo| {
+                    crate::query::repo_matches(repo, r, normalized_scope.as_deref())
+                }) {
                     continue;
                 }
             }
-            let real = last_real_command(&s.cmd);
+            let real = first_real_command(&s.cmd);
             let key = key_of(real);
             let c = map.entry(key.clone()).or_insert_with(|| Cluster {
                 key: key.clone(),
@@ -79,8 +122,18 @@ fn cluster_signals(scope: &RepoScope) -> Vec<Cluster> {
                 count: 0,
                 repos: BTreeSet::new(),
                 agents: BTreeSet::new(),
+                sessions: BTreeSet::new(),
+                first_ts: s.ts.clone(),
+                last_ts: s.ts.clone(),
+                stderr_sample: s.stderr_head.clone(),
             });
             c.count += 1;
+            if s.ts < c.first_ts {
+                c.first_ts = s.ts.clone();
+            }
+            if s.ts > c.last_ts {
+                c.last_ts = s.ts.clone();
+            }
             *c.cmds.entry(real.to_string()).or_insert(0) += 1;
             if let Some(r) = s.repo {
                 c.repos.insert(r);
@@ -88,11 +141,17 @@ fn cluster_signals(scope: &RepoScope) -> Vec<Cluster> {
             if let Some(a) = s.agent {
                 c.agents.insert(a);
             }
+            if let Some(session) = s.session {
+                c.sessions.insert(session);
+            }
+            if c.stderr_sample.as_deref().is_none_or(str::is_empty) {
+                c.stderr_sample = s.stderr_head;
+            }
         }
     }
     let mut v: Vec<Cluster> = map.into_values().collect();
     v.sort_by(|a, b| b.count.cmp(&a.count).then(a.key.cmp(&b.key)));
-    v
+    (v, signal_read_errors)
 }
 
 /// Programs whose first argument is a verb subcommand (e.g. `git pull`), not a
@@ -101,17 +160,14 @@ fn cluster_signals(scope: &RepoScope) -> Vec<Cluster> {
 /// name alone is the key (so `python3 a.py` and `python3 b.py` group as
 /// `python3`, not one cluster per script).
 const SUBCOMMAND_TOOLS: &[&str] = &[
-    "git", "cargo", "npm", "yarn", "pnpm", "go", "kubectl", "docker", "brew", "apt",
-    "apt-get", "pip", "pip3", "rustup", "mix", "mvn", "gradle", "rake", "composer", "gem",
+    "git", "cargo", "npm", "yarn", "pnpm", "go", "kubectl", "docker", "brew", "apt", "apt-get",
+    "pip", "pip3", "rustup", "mix", "mvn", "gradle", "rake", "composer", "gem",
 ];
 
-/// The real command in `cmd`, stripped of directory-change and privilege
-/// prefixes so `cd repo && go run ./cmd` and `sudo apt-get install x` resolve to
-/// the program that actually did the work. A `&&` chain stops at its first
-/// failure, so the last real segment is the best single representative; full
-/// attribution across a chain stays a Layer 3 judgment, never a cluster concern.
-fn last_real_command(cmd: &str) -> &str {
-    let mut last_real: Option<&str> = None;
+/// The first command that can determine a compound command's failure. Leading
+/// directory changes are skipped. Later `&&` segments may never have executed,
+/// so attributing the failure to the last segment would invent evidence.
+fn first_real_command(cmd: &str) -> &str {
     for seg in cmd.split("&&") {
         let s = seg.trim();
         if s.is_empty() {
@@ -132,9 +188,9 @@ fn last_real_command(cmd: &str) -> &str {
         if base.eq_ignore_ascii_case("cd") {
             continue; // a directory change, not a real command
         }
-        last_real = Some(s);
+        return s;
     }
-    last_real.unwrap_or(cmd.trim())
+    cmd.trim()
 }
 
 /// Cluster key for an already-stripped real command: the program basename,
@@ -179,7 +235,7 @@ fn key_of(real: &str) -> String {
 /// production path uses (which also needs the real command for the modal sample).
 #[cfg(test)]
 fn normalize_key(cmd: &str) -> String {
-    key_of(last_real_command(cmd))
+    key_of(first_real_command(cmd))
 }
 
 /// The most frequent real command in a cluster — the representative sample so
@@ -198,9 +254,12 @@ fn build_pack(
     events: &[Event],
     clusters: &[Cluster],
     skipped: &[crate::store::SkippedFile],
+    signal_read_errors: usize,
     max_tokens: u32,
-) -> String {
+) -> PackBuilt {
     let budget = (max_tokens as usize).saturating_mul(4);
+    let event_budget = budget.saturating_mul(55) / 100;
+    let cluster_budget = budget.saturating_sub(event_budget);
     let mut out = String::new();
     out.push_str("# Papercut triage pack\n\n");
     match scope {
@@ -221,63 +280,70 @@ fn build_pack(
     if !skipped.is_empty() {
         out.push_str(&format!("; {} skipped file(s)", skipped.len()));
     }
+    if signal_read_errors > 0 {
+        out.push_str(&format!(
+            "; {signal_read_errors} unreadable signal record(s)"
+        ));
+    }
     out.push_str("\n\n");
 
-    // Events first — the actionable triage content. Events AND clusters share one
-    // budget (G) so a requested `--max-tokens` bounds the whole pack, never just
-    // the clusters.
-    out.push_str("## Events\n\n");
+    let mut event_block = String::from("## Events\n\n");
+    let mut included_events = Vec::new();
     if events.is_empty() {
-        out.push_str("_none_\n\n");
+        event_block.push_str("_none_\n\n");
     } else {
         let mut omitted = 0usize;
         for (i, e) in events.iter().enumerate() {
+            let repo = e.context.repo.as_deref().unwrap_or("?");
             let line = format!(
-                "- **{}** [{}] {}\n",
+                "- **{}** [{}] {} {} — {}\n{}{}",
                 md_single_line(&e.id),
                 e.status.label(),
-                // Content column 2 under the `- ` bullet → safe indent 6
-                // (util::safe_continuation_indent), so a multiline summary can
-                // never forge a heading/bullet/fence in the model-facing pack.
-                md_indent_continuation(&truncate(&e.summary, 160), "      ")
+                md_single_line(e.created_at.get(..10).unwrap_or(&e.created_at)),
+                md_code_span(&truncate(repo, 80)),
+                md_indent_continuation(&truncate(&e.summary, 320), "      "),
+                format_optional_event_field("hypothesis", e.hypothesis.as_deref()),
+                format_optional_event_field("suggested fix", e.suggested_fix.as_deref()),
             );
-            if out.len() + line.len() > budget {
+            if event_block.len() + line.len() > event_budget {
                 omitted = events.len() - i;
                 break;
             }
-            out.push_str(&line);
+            event_block.push_str(&line);
+            included_events.push(e.clone());
         }
         if omitted > 0 {
-            out.push_str(&format!(
-                "\n... {omitted} more event(s) omitted (token budget; raise --max-tokens)\n"
+            event_block.push_str(&format!(
+                "\n... {omitted} more event(s) omitted (use --offset or raise --max-tokens)\n"
             ));
         }
-        out.push('\n');
+        event_block.push('\n');
     }
+    out.push_str(&event_block);
 
-    // Signal clusters, token-budget-aware.
-    out.push_str("## Signal clusters (recurring failures)\n\n");
+    let mut cluster_block = String::from("## Signal clusters (recurring failures)\n\n");
+    let mut included_clusters = Vec::new();
     if clusters.is_empty() {
-        out.push_str("_none — no automatic signals recorded_\n\n");
+        cluster_block.push_str("_none — no automatic signals recorded_\n\n");
     } else {
         let mut omitted = 0usize;
         for (i, c) in clusters.iter().enumerate() {
             let line = format_cluster(c);
-            if out.len() + line.len() > budget {
+            if cluster_block.len() + line.len() > cluster_budget {
                 omitted = clusters.len() - i;
                 break;
             }
-            out.push_str(&line);
+            cluster_block.push_str(&line);
+            included_clusters.push(cluster_json(c));
         }
         if omitted > 0 {
-            out.push_str(&format!(
-                "\n... {omitted} more cluster(s) omitted (token budget; raise --max-tokens)\n"
+            cluster_block.push_str(&format!(
+                "\n... {omitted} more cluster(s) omitted (use --offset or raise --max-tokens)\n"
             ));
         }
-        // Blank line before the next section, mirroring the Events branch above
-        // so every section header is preceded by a blank line.
-        out.push('\n');
+        cluster_block.push('\n');
     }
+    out.push_str(&cluster_block);
 
     // F8: the per-file skipped detail, emitted LAST. Count-capped +
     // reason-truncated; whatever budget remains after the events/clusters above
@@ -314,7 +380,23 @@ fn build_pack(
         }
     }
 
-    out
+    PackBuilt {
+        markdown: out,
+        events: included_events,
+        clusters: included_clusters,
+    }
+}
+
+fn format_optional_event_field(label: &str, value: Option<&str>) -> String {
+    value
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            format!(
+                "  - {label}: {}\n",
+                md_indent_continuation(&truncate(value, 200), "    ")
+            )
+        })
+        .unwrap_or_default()
 }
 
 fn format_cluster(c: &Cluster) -> String {
@@ -328,13 +410,41 @@ fn format_cluster(c: &Cluster) -> String {
     } else {
         c.agents.iter().cloned().collect::<Vec<_>>().join(", ")
     };
+    let error = c
+        .stderr_sample
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            format!(
+                "  - error sample: {}\n",
+                md_indent_continuation(&truncate(value, 240), "    ")
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "- **{count}×** {sample} — agents: {agents}; repos: {repos}\n",
+        "- **{count}×** {sample} — {first} to {last}; {sessions} session(s); agents: {agents}; repos: {repos}\n{error}",
         count = c.count,
         sample = md_code_span(&truncate(cluster_sample(c), 80)),
+        first = md_single_line(c.first_ts.get(..10).unwrap_or(&c.first_ts)),
+        last = md_single_line(c.last_ts.get(..10).unwrap_or(&c.last_ts)),
+        sessions = c.sessions.len(),
         agents = truncate(&md_single_line(&agents), 60),
         repos = truncate(&md_single_line(&repos), 60),
     )
+}
+
+fn cluster_json(cluster: &Cluster) -> serde_json::Value {
+    json!({
+        "key": cluster.key,
+        "count": cluster.count,
+        "sample": cluster_sample(cluster),
+        "repos": cluster.repos,
+        "agents": cluster.agents,
+        "sessions": cluster.sessions.len(),
+        "first_ts": cluster.first_ts,
+        "last_ts": cluster.last_ts,
+        "stderr_sample": cluster.stderr_sample,
+    })
 }
 
 #[cfg(test)]
@@ -377,6 +487,11 @@ mod tests {
         // `sudo` is stripped only as a whole first word — `sudoedit` is a
         // distinct program and must not be mangled into `edit`.
         assert_eq!(normalize_key("sudoedit /etc/sudoers"), "sudoedit");
+    }
+
+    #[test]
+    fn key_never_attributes_failure_to_unexecuted_and_segment() {
+        assert_eq!(normalize_key("false && echo never-ran"), "false");
     }
 
     #[test]

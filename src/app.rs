@@ -71,6 +71,8 @@ pub fn run(cli: Cli) -> i32 {
         Command::Doctor => commands::doctor::run(),
         Command::Sweep(a) => commands::sweep::run(a),
         Command::TriagePack(a) => commands::triage_pack::run(a),
+        Command::Close(a) => commands::close::run(a),
+        Command::Stats => commands::stats::run(),
     };
 
     match res {

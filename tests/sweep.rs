@@ -73,6 +73,167 @@ fn zero_exit_produces_no_signal() {
 }
 
 #[test]
+fn current_custom_exec_failure_produces_signal() {
+    let env = IsolatedEnv::new().with_codex();
+    let f = env
+        .home
+        .join(".codex/sessions/2026/09/19/rollout-current.jsonl");
+    let call = r#"{"timestamp":"2026-09-19T10:00:00Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"cx1","input":"text(await tools.exec_command({cmd:\"cargo test\"}));"}}"#;
+    let output = r#"{"timestamp":"2026-09-19T10:00:01Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"cx1","output":[{"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n{\"exit_code\":7,\"output\":\"synthetic failure\"}"}]}}"#;
+    write_rollout(&f, &format!("{META}\n{call}\n{output}\n"));
+
+    let outcome = codex::sweep();
+    assert_eq!(outcome.signals_emitted, 1);
+    let (signals, skipped) = papercut::signal::read_signals("codex");
+    assert_eq!(skipped, 0);
+    assert_eq!(signals[0].cmd, "cargo test");
+    assert_eq!(signals[0].exit, 7);
+}
+
+#[test]
+fn current_custom_exec_maps_each_result_to_its_command() {
+    let env = IsolatedEnv::new().with_codex();
+    let f = env
+        .home
+        .join(".codex/sessions/2026/09/19/rollout-current-many.jsonl");
+    let call = r#"{"timestamp":"2026-09-19T10:00:00Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"cx1","input":"const a = await tools.exec_command({cmd:\"true\"}); const b = await tools.exec_command({cmd:\"false\"});"}}"#;
+    let output = r#"{"timestamp":"2026-09-19T10:00:01Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"cx1","output":[{"type":"input_text","text":"Output:\n[{\"exit_code\":0,\"output\":\"\"},{\"exit_code\":3,\"output\":\"failed second\"}]"}]}}"#;
+    write_rollout(&f, &format!("{META}\n{call}\n{output}\n"));
+
+    let outcome = codex::sweep();
+    assert_eq!(outcome.signals_emitted, 1);
+    let (signals, _) = papercut::signal::read_signals("codex");
+    assert_eq!(signals[0].cmd, "false");
+    assert_eq!(signals[0].exit, 3);
+}
+
+#[test]
+fn current_custom_exec_reads_json_after_status_text_blocks() {
+    let env = IsolatedEnv::new().with_codex();
+    let f = env
+        .home
+        .join(".codex/sessions/2026/09/19/rollout-current-blocks.jsonl");
+    let call = r#"{"timestamp":"2026-09-19T10:00:00Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"cx1","input":"text(await tools.exec_command({cmd:\"cargo clippy\"}));"}}"#;
+    let output = r#"{"timestamp":"2026-09-19T10:00:01Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"cx1","output":[{"type":"input_text","text":"Script completed\nOutput:\n"},{"type":"input_text","text":"Warning: truncated output\n\n{\"exit_code\":4,\"output\":\"lint failed\"}"}]}}"#;
+    write_rollout(&f, &format!("{META}\n{call}\n{output}\n"));
+
+    let outcome = codex::sweep();
+    assert_eq!(outcome.signals_emitted, 1);
+    let (signals, _) = papercut::signal::read_signals("codex");
+    assert_eq!(signals[0].cmd, "cargo clippy");
+    assert_eq!(signals[0].exit, 4);
+}
+
+#[test]
+fn session_repository_url_takes_precedence_over_cwd_lookup() {
+    let env = IsolatedEnv::new().with_codex();
+    let f = env
+        .home
+        .join(".codex/sessions/2026/09/19/rollout-repo.jsonl");
+    let meta = r#"{"timestamp":"2026-09-19T10:00:00Z","type":"session_meta","payload":{"id":"sess-repo","cwd":"/deleted/repo","git":{"repository_url":"https://github.com/acme/widget.git"}}}"#;
+    write_rollout(&f, &format!("{meta}\n{CALL}\n{OUT_FAIL}\n"));
+
+    let outcome = codex::sweep();
+    assert_eq!(outcome.signals_emitted, 1);
+    let (signals, _) = papercut::signal::read_signals("codex");
+    assert_eq!(signals[0].repo.as_deref(), Some("github.com/acme/widget"));
+}
+
+#[test]
+fn polled_process_failure_keeps_original_command() {
+    let env = IsolatedEnv::new().with_codex();
+    let f = env
+        .home
+        .join(".codex/sessions/2026/09/19/rollout-polled.jsonl");
+    let running = r#"{"timestamp":"2026-09-19T10:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"Process running with session ID 431\nOutput:\n"}}"#;
+    let poll = r#"{"timestamp":"2026-09-19T10:00:03Z","type":"response_item","payload":{"type":"function_call","name":"write_stdin","arguments":"{\"session_id\":431,\"chars\":\"\"}","call_id":"c2"}}"#;
+    let failed = r#"{"timestamp":"2026-09-19T10:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c2","output":"Process exited with code 9\nOutput:\nlate failure"}}"#;
+    write_rollout(
+        &f,
+        &format!("{META}\n{CALL}\n{running}\n{poll}\n{failed}\n"),
+    );
+
+    let outcome = codex::sweep();
+    assert_eq!(outcome.signals_emitted, 1);
+    let (signals, _) = papercut::signal::read_signals("codex");
+    assert_eq!(signals[0].cmd, "make build");
+    assert_eq!(signals[0].exit, 9);
+}
+
+#[test]
+fn current_backfill_is_idempotent_and_skips_legacy_failures() {
+    let env = IsolatedEnv::new().with_codex();
+    let f = env
+        .home
+        .join(".codex/sessions/2026/09/19/rollout-backfill.jsonl");
+    let call = r#"{"timestamp":"2026-09-19T10:00:00Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"cx1","input":"text(await tools.exec_command({cmd:\"cargo test\"}));"}}"#;
+    let output = r#"{"timestamp":"2026-09-19T10:00:01Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"cx1","output":[{"type":"input_text","text":"Script completed\nOutput:\n{\"exit_code\":7,\"output\":\"synthetic failure\"}"}]}}"#;
+    write_rollout(
+        &f,
+        &format!("{META}\n{CALL}\n{OUT_FAIL}\n{call}\n{output}\n"),
+    );
+
+    // Model an older adapter. It advanced the normal watermark and recorded
+    // the legacy failure, but it did not understand the current record shape.
+    let legacy = papercut::signal::Signal::new(
+        "2026-09-19T09:00:00Z",
+        None,
+        None,
+        Some("codex".into()),
+        "make build",
+        2,
+        Some("old failure"),
+        Some("sess-1".into()),
+    );
+    papercut::signal::append_signal("codex", "sess-1", &legacy).unwrap();
+    let mut sweeps = papercut::store::Sweeps::default();
+    sweeps.marks.insert(
+        "codex".into(),
+        papercut::store::SweepMark {
+            files: [(
+                rel_key(&env.home, &f),
+                papercut::store::FileMark {
+                    offset: f.metadata().unwrap().len(),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            ..Default::default()
+        },
+    );
+    papercut::store::write_sweeps(&sweeps).unwrap();
+
+    let first = codex::backfill_current();
+    assert_eq!(first.signals_emitted, 1);
+    let second = codex::backfill_current();
+    assert_eq!(second.signals_emitted, 0);
+    assert_eq!(
+        papercut::signal::read_signals("codex").0.len(),
+        2,
+        "the legacy failure is not duplicated and the backfill is one-time"
+    );
+
+    let next_call = r#"{"timestamp":"2026-09-19T10:01:00Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"cx2","input":"text(await tools.exec_command({cmd:\"cargo check\"}));"}}"#;
+    let next_output = r#"{"timestamp":"2026-09-19T10:01:01Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"cx2","output":[{"type":"input_text","text":"Output:\n{\"exit_code\":8,\"output\":\"new failure\"}"}]}}"#;
+    append_rollout(&f, &format!("{next_call}\n{next_output}\n"));
+    let normal = codex::sweep();
+    assert_eq!(normal.signals_emitted, 1);
+    let signals = papercut::signal::read_signals("codex").0;
+    assert_eq!(
+        signals.len(),
+        3,
+        "normal sweep does not repeat the backfill"
+    );
+    assert_eq!(
+        signals
+            .iter()
+            .filter(|signal| signal.cmd == "cargo test")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn incremental_sweep_does_not_duplicate_then_picks_up_new() {
     let env = IsolatedEnv::new().with_codex();
     let f = env
@@ -507,7 +668,9 @@ fn legacy_absolute_key_is_relativized_without_duplicate() {
 #[test]
 fn orphaned_absolute_key_under_gone_home_is_dropped_and_reswept() {
     let env = IsolatedEnv::new().with_codex();
-    let f = env.home.join(".codex/sessions/2026/08/04/rollout-orphan.jsonl");
+    let f = env
+        .home
+        .join(".codex/sessions/2026/08/04/rollout-orphan.jsonl");
     write_rollout(&f, &format!("{META}\n{CALL}\n{OUT_FAIL}\n"));
 
     // An absolute key under a DIFFERENT root that no longer exists: the file at
@@ -525,7 +688,10 @@ fn orphaned_absolute_key_under_gone_home_is_dropped_and_reswept() {
     papercut::store::write_sweeps(&sweeps).unwrap();
 
     let out = codex::sweep();
-    assert_eq!(out.signals_emitted, 1, "unmarked real file is swept: {out:?}");
+    assert_eq!(
+        out.signals_emitted, 1,
+        "unmarked real file is swept: {out:?}"
+    );
     let after = papercut::store::read_sweeps();
     let files = &after.marks["codex"].files;
     assert!(

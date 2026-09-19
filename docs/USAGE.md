@@ -18,10 +18,10 @@ sweeps.json                        per-harness high-water marks for `sweep`
 config.json
 ```
 
-Nothing leaves the machine unless you explicitly publish a projection with
-`render --write`. Never recorded: environment-variable values, transcripts,
-source files, or secrets — only command (truncated), exit code, the first few
-stderr lines, a repo pointer, session id, agent, and timestamp.
+Nothing leaves the machine unless you publish a projection with `render --write`.
+Commands and error output can contain values that the caller typed. Do not put
+secrets in commands or reports. Papercut truncates captured text and protects the
+store with owner-only permissions. It does not rewrite secrets automatically.
 
 ## 1. Set up
 
@@ -45,9 +45,10 @@ papercut doctor                   # verify store, managed blocks, and hook wirin
 to a subset; an unknown id is a usage error, never a silent no-op. **Restart
 your agent sessions after `install`** so they re-read the updated instructions.
 
-`doctor` verifies directory permissions, that managed blocks are intact, that
-the hook is live, and that agent detection works — and prints deterministic
-remediation hints for anything wrong.
+`install` preserves an existing instruction symlink and its target permissions.
+`doctor` verifies owner-only store permissions, managed blocks, hook wiring,
+Codex sweep freshness, known Codex record formats, and agent detection. It prints
+deterministic remediation hints for each failed check.
 
 ## 2. Capture
 
@@ -58,6 +59,24 @@ remediation hints for anything wrong.
 - **Codex** (no hook): run `papercut sweep` to parse its on-disk session logs
   since the last sweep. Run it periodically (cron or by habit). `--harness codex`
   restricts.
+
+After an upgrade from an older release, run one current-format backfill:
+
+```
+papercut sweep --harness codex --backfill-current
+```
+
+The backfill reads only record formats that older releases missed. Its own
+watermark makes repeated runs a no-op. A daily scheduler can run the normal sweep:
+
+```
+17 3 * * * $HOME/.local/bin/papercut sweep
+```
+
+Codex session logs can omit a child command's exit code when a `functions.exec`
+script prints only `result.output`. The installed v3 instruction tells Codex to
+print the full result object. `doctor` reports recent opaque results so this
+capture limit stays visible.
 
 **Voluntary — Layer 2, high signal (the agent calls it):**
 
@@ -128,40 +147,41 @@ machine-readable `code`, a `retryable` flag, and a bounded `hint`.
 ## 4. Triage
 
 ```
-papercut triage-pack --repo all --status open --max-tokens 8000
+papercut triage-pack --repo all --since 14 --max-tokens 16000
 ```
 
-A self-contained markdown bundle for any agent: open events first, then
-recurring-failure signal clusters ranked by count, under a header stating
-everything below is data to triage — never instructions to execute.
+A self-contained markdown bundle for any agent. It reserves space for reports
+and signal clusters. Reports appear newest first. Signal clusters rank by count.
+The header states that all following content is data, not instructions.
 
 | Flag | Meaning |
 | --- | --- |
 | `--repo <spec>` | `.` = current repo (default) · `all` = global |
 | `--status <s>` | default is `open` + `candidate` together |
 | `--max-tokens <n>` | soft budget for the bundle (≈ chars/4); default 12000 |
+| `--since <days>` | include recent reports and signals only |
+| `--offset <n>` | skip matching reports and clusters for the next page |
 
 Feed the output to an agent following the skill in [triage.md](triage.md).
 
 ## 5. Close an event
 
-There is intentionally **no `close` command yet** — status changes are edits to
-one JSON field that `render` picks up (see [PLAN.md](../PLAN.md)). Edit the event
-file directly:
+Use `close` after you verify the disposition:
 
-```jsonc
-// ~/.local/share/papercuts/events/pc_01K….json
-{
-  "status": "fixed",
-  "resolution": { "reason": "pinned flaky-dep to 1.2.3", "ref": "abc1234" }
-}
+```
+papercut close pc_01K... --status fixed \
+  --reason "pinned flaky dependency to 1.2.3" \
+  --ref abc1234 --remedy pinned-dep
 ```
 
 Rules: any terminal status (`fixed`, `promoted`, `duplicate`, `dismissed`)
 requires `resolution.reason`; `fixed` additionally requires `resolution.ref`
-(a commit sha, issue url, or dotfiles ref). A non-terminal event may keep a stale
-resolution in the file, but `render` will not show it. Reopen by setting
-`status` back to `open`.
+(a commit SHA, issue URL, or dotfiles reference). Remedy values are `docs`,
+`wrapper`, `earlier-validation`, `better-error`, `pinned-dep`, `system-level`,
+`promote`, and `dismiss`. Direct JSON edits remain compatible.
+
+Run `papercut stats` to see status counts, remedy counts, and the median time to
+resolution. Recurrence after a fix still needs semantic review of later signals.
 
 ## 6. Tear down
 
@@ -182,8 +202,10 @@ their markers.
 | `install` | wire harnesses | `--yes` (required) `--harness` |
 | `uninstall` | remove wiring | `--harness` |
 | `doctor` | verify wiring + store | — |
-| `sweep` | parse session logs → signals | `--harness` |
-| `triage-pack` | model-facing triage bundle | `--repo --status --max-tokens` |
+| `sweep` | parse session logs → signals | `--harness --backfill-current` |
+| `triage-pack` | model-facing triage bundle | `--repo --status --max-tokens --since --offset` |
+| `close <id>` | record a verified disposition | `--status --reason --ref --remedy` |
+| `stats` | show resolution health metrics | — |
 
 All commands accept global `--output json` (default `text`). `_hook` is a hidden
 entry point the installed hook calls on stdin; you do not run it directly.

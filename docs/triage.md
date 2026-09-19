@@ -11,13 +11,12 @@ The loop — not the log — is the product. An unreviewed store is a complaints
 ```
 papercut triage-pack --repo all            # open + candidate events, and signal clusters
 papercut triage-pack --repo all --status open
-papercut triage-pack --repo . --max-tokens 8000
+papercut triage-pack --repo . --since 14 --max-tokens 16000
 ```
 
-The pack is token-budget-aware and self-contained: open events first, then recurring
-signal clusters ranked by count. Events are human reports (higher signal); signal clusters
-are automatic facts (higher recall). A cluster with **no** matching report is itself a
-finding — silent recurring friction.
+The pack is token-budget-aware and self-contained. It reserves space for events and
+signal clusters. Events appear newest first. Signal clusters rank by count. A cluster
+with **no** matching report is itself a finding: silent recurring friction.
 
 ## Invariants (the skill must not violate these)
 
@@ -31,7 +30,8 @@ finding — silent recurring friction.
 - **Semantic dedup happens here, in a model at review time — never in the capture path.**
   Duplicates are evidence; near-duplicate reports often point to one root cause.
 - **The store is private.** Never publish an event into a repo without explicit human
-  approval. Never write secrets, env-var values, transcripts, or source files into events.
+  approval. Commands and error output can contain typed values. Do not put secrets in
+  commands or reports.
 
 ## Procedure
 
@@ -61,29 +61,20 @@ finding — silent recurring friction.
    - `dismiss` — not a papercut after all (ordinary debugging, expected behavior, a one-off
      the reporter won't hit again).
 
-5. **Apply small, low-risk fixes in-session with human approval** (docs line, wrapper, pin,
-   earlier validation). For larger changes or anything touching global config, propose the
-   diff and let the human land it. Cross-repo / system-level fixes are the highest-value
-   output of a triage — they retire a whole class of future reports at once.
+5. **Apply verified fixes within the approved task scope.** Keep each change small.
+   Cross-repo and system-level fixes can retire one cause across many projects.
 
-6. **Close.** Update each resolved event's JSON file to a terminal status with a
-   `resolution`. `close`/`promote` are deliberately not commands yet (plain edits to one
-   JSON field haven't hurt enough to warrant them); `render` picks up the new status.
+6. **Close.** Run `papercut close` for each verified event. Record the terminal
+   status, reason, reference, and remedy class.
 
 ## Closing an event (the mechanics)
 
-Events are one file each: `~/.local/share/papercuts/events/<id>.json`. To close, edit the
-two fields `status` and `resolution` and leave everything else byte-identical:
+Close a verified event with one command:
 
-```jsonc
-{
-  // ...all other fields unchanged...
-  "status": "fixed",                       // fixed | promoted | duplicate | dismissed
-  "resolution": {
-    "reason": "pinned flaky-dep to 1.2.3", // required for every terminal status
-    "ref": "abc1234"                       // commit sha | issue url | dotfiles ref
-  }
-}
+```
+papercut close pc_01K... --status fixed \
+  --reason "pinned flaky dependency to 1.2.3" \
+  --ref abc1234 --remedy pinned-dep
 ```
 
 Rules enforced by `Event::validate`:
@@ -91,10 +82,8 @@ Rules enforced by `Event::validate`:
 - Every terminal status (`fixed`, `promoted`, `duplicate`, `dismissed`) requires a
   non-empty `resolution.reason`.
 - `fixed` additionally requires a non-empty `resolution.ref` (where the fix landed).
-- A non-terminal event (`open`, `candidate`) **may** keep a stale `resolution` in its
-  file — for example, after flipping a `fixed` event back to `open` to reopen it.
-  `validate` does not reject it; `render` and `list` project off `status`, not
-  `resolution`, so the stale resolution is simply not shown.
+- `close` records `resolution.resolved_at` and `resolution.remedy`.
+- Direct JSON edits remain compatible with older automation.
 
 Promote a `candidate` cluster into a tracked item by writing a new event (or editing an
 existing `candidate` event) with `source: "triage"`. After closing, regenerate the
@@ -106,8 +95,8 @@ papercut render --repo .     # or --repo all, optionally --write
 
 ## Health (how to know the loop is working)
 
-Track these across sessions — never raw report count, which measures agent diligence, not
-friction closed:
+Run `papercut stats` for status counts, remedy counts, and the median resolution
+time. Also track these across sessions:
 
 - recurrence-after-fix (did the signal cluster stop growing?)
 - median time report → resolution

@@ -104,6 +104,38 @@ pub struct Resolution {
     pub reason: String,
     #[serde(rename = "ref", skip_serializing_if = "Option::is_none", default)]
     pub ref_: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub resolved_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub remedy: Option<Remedy>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum Remedy {
+    Docs,
+    Wrapper,
+    EarlierValidation,
+    BetterError,
+    PinnedDep,
+    SystemLevel,
+    Promote,
+    Dismiss,
+}
+
+impl Remedy {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Docs => "docs",
+            Self::Wrapper => "wrapper",
+            Self::EarlierValidation => "earlier_validation",
+            Self::BetterError => "better_error",
+            Self::PinnedDep => "pinned_dep",
+            Self::SystemLevel => "system_level",
+            Self::Promote => "promote",
+            Self::Dismiss => "dismiss",
+        }
+    }
 }
 
 /// One papercut event. `schema_version` pins the on-disk shape.
@@ -210,6 +242,7 @@ mod tests {
             Some(Resolution {
                 reason: "done".into(),
                 ref_: None,
+                ..Default::default()
             }),
         );
         assert!(e.validate().is_err());
@@ -222,6 +255,7 @@ mod tests {
             Some(Resolution {
                 reason: "done".into(),
                 ref_: Some("abc1234".into()),
+                ..Default::default()
             }),
         );
         assert!(e.validate().is_ok());
@@ -238,6 +272,7 @@ mod tests {
                 Some(Resolution {
                     reason: "done".into(),
                     ref_: Some(blank.into()),
+                    ..Default::default()
                 }),
             );
             assert!(
@@ -257,6 +292,7 @@ mod tests {
             Some(Resolution {
                 reason: "previously fixed".into(),
                 ref_: Some("abc1234".into()),
+                ..Default::default()
             }),
         );
         assert!(e.validate().is_ok());
@@ -269,6 +305,7 @@ mod tests {
             Some(Resolution {
                 reason: "pinned".into(),
                 ref_: Some("abc1234".into()),
+                ..Default::default()
             }),
         );
         let s = serde_json::to_string(&e).unwrap();

@@ -53,7 +53,7 @@ fn block_upsert_is_idempotent_and_preserves_user_content() {
     let after = std::fs::read_to_string(env.home.join(".claude/CLAUDE.md")).unwrap();
     assert!(after.contains("# My rules"), "user heading preserved");
     assert!(after.contains("Do good work."), "user body preserved");
-    assert!(after.contains("papercut:begin v2"));
+    assert!(after.contains("papercut:begin v3"));
     assert_eq!(after.matches("papercut:begin").count(), 1);
     let len1 = after.len();
 
@@ -69,6 +69,42 @@ fn block_upsert_is_idempotent_and_preserves_user_content() {
     assert!(!after3.contains("papercut"), "block fully removed");
     assert!(after3.contains("# My rules"));
     assert!(after3.contains("Do good work."));
+}
+
+#[cfg(unix)]
+#[test]
+fn install_preserves_shared_instruction_symlink_and_mode() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let env = IsolatedEnv::new().with_codex();
+    let shared = env.home.join("shared-instructions.md");
+    std::fs::write(&shared, "# Shared rules\n").unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let link = env.home.join(".codex/AGENTS.md");
+    symlink(&shared, &link).unwrap();
+
+    install(true, Some("codex"));
+    assert!(
+        link.is_symlink(),
+        "install must keep the harness path as a symlink"
+    );
+    assert!(std::fs::read_to_string(&shared)
+        .unwrap()
+        .contains("papercut:begin"));
+    assert_eq!(
+        shared.metadata().unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    uninstall(Some("codex"));
+    assert!(link.is_symlink(), "uninstall must keep the symlink too");
+    assert!(!std::fs::read_to_string(&shared)
+        .unwrap()
+        .contains("papercut"));
+    assert_eq!(
+        shared.metadata().unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 }
 
 #[test]
@@ -460,6 +496,41 @@ fn doctor_unhealthy_before_install_healthy_after() {
     assert!(check_ok(&after, "adapter:claude-code"));
 }
 
+#[cfg(unix)]
+#[test]
+fn doctor_flags_store_paths_with_broad_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = IsolatedEnv::new();
+    papercut::store::ensure_store().unwrap();
+    let root = env.data.join("papercuts");
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o775)).unwrap();
+
+    let data = doctor_data();
+    let check = data["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "store_permissions")
+        .unwrap();
+    assert_eq!(check["ok"], false);
+    assert!(check["hint"].as_str().unwrap().contains("chmod -R go-rwx"));
+}
+
+#[test]
+fn doctor_flags_missing_codex_sweep_state() {
+    let _env = IsolatedEnv::new().with_codex();
+    let data = doctor_data();
+    let check = data["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "adapter:codex:freshness")
+        .unwrap();
+    assert_eq!(check["ok"], false);
+    assert!(check["hint"].as_str().unwrap().contains("papercut sweep"));
+}
+
 #[test]
 fn doctor_flags_stale_block_version() {
     let env = IsolatedEnv::new().with_claude();
@@ -469,7 +540,7 @@ fn doctor_flags_stale_block_version() {
     let p = env.home.join(".claude/CLAUDE.md");
     let c = std::fs::read_to_string(&p)
         .unwrap()
-        .replace("papercut:begin v2", "papercut:begin v0");
+        .replace("papercut:begin v3", "papercut:begin v0");
     std::fs::write(&p, c).unwrap();
 
     let data = doctor_data();
@@ -777,7 +848,7 @@ fn harness_filter_restricts_install_and_uninstall() {
 
     // claude-code got the block; codex's file was never created/touched.
     let claude_md = std::fs::read_to_string(env.home.join(".claude/CLAUDE.md")).unwrap();
-    assert!(claude_md.contains("papercut:begin v2"));
+    assert!(claude_md.contains("papercut:begin v3"));
     let codex_md = std::fs::read_to_string(env.home.join(".codex/AGENTS.md")).unwrap_or_default();
     assert!(
         !codex_md.contains("papercut"),

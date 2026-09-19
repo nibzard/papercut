@@ -48,10 +48,16 @@ pub fn detect() -> AgentInfo {
     }
 
     // 3. Codex / OpenCode via their home-dir env vars.
-    if env::var_os("CODEX_HOME").is_some() {
+    if env::var_os("CODEX_HOME").is_some()
+        || env::var_os("CODEX_SESSION_ID").is_some()
+        || env::var_os("CODEX_THREAD_ID").is_some()
+    {
         return AgentInfo {
             agent: "codex".into(),
-            session: env::var("CODEX_SESSION_ID").ok().filter(|s| !s.is_empty()),
+            session: env::var("CODEX_SESSION_ID")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(|| env::var("CODEX_THREAD_ID").ok().filter(|s| !s.is_empty())),
         };
     }
     if env::var_os("OPENCODE_CONFIG").is_some() {
@@ -78,7 +84,10 @@ fn session_for(agent: &str) -> Option<String> {
         "claude-code" => env::var("CLAUDE_CODE_SESSION_ID")
             .ok()
             .filter(|s| !s.is_empty()),
-        "codex" => env::var("CODEX_SESSION_ID").ok().filter(|s| !s.is_empty()),
+        "codex" => env::var("CODEX_SESSION_ID")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| env::var("CODEX_THREAD_ID").ok().filter(|s| !s.is_empty())),
         _ => None,
     }
 }
@@ -94,6 +103,7 @@ mod tests {
         "CLAUDE_CODE_SESSION_ID",
         "CODEX_HOME",
         "CODEX_SESSION_ID",
+        "CODEX_THREAD_ID",
         "OPENCODE_CONFIG",
     ];
 
@@ -131,5 +141,14 @@ mod tests {
         env::set_var("AI_AGENT", "codex_0.105.0_x86");
         let info = detect();
         assert_eq!(info.agent, "codex");
+    }
+
+    #[test]
+    fn detects_codex_from_session_marker_without_codex_home() {
+        let _g = clean_guard();
+        env::set_var("CODEX_SESSION_ID", "sess-current");
+        let info = detect();
+        assert_eq!(info.agent, "codex");
+        assert_eq!(info.session.as_deref(), Some("sess-current"));
     }
 }

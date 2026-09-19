@@ -25,6 +25,7 @@ pub fn run() -> RunResult {
 
     // 1. Store exists and is writable.
     checks.push(check_store());
+    checks.push(check_store_permissions());
 
     // 1b. Orphaned .tmp files in events/ — leftovers from an interrupted atomic
     // write. They never corrupt reads (is_event_file excludes them) but they
@@ -73,6 +74,8 @@ pub fn run() -> RunResult {
                 detail,
                 hint: String::new(),
             });
+            checks.push(check_codex_freshness());
+            checks.push(check_codex_format());
         }
     }
 
@@ -290,6 +293,105 @@ fn check_store() -> Check {
     }
 }
 
+#[cfg(unix)]
+fn check_store_permissions() -> Check {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Some(root) = crate::paths::data_root() else {
+        return Check {
+            name: "store_permissions".into(),
+            ok: false,
+            detail: "no home data dir".into(),
+            hint: "set $HOME or $XDG_DATA_HOME".into(),
+        };
+    };
+    let mut wide = Vec::new();
+    let mut pending = vec![root.clone()];
+    while let Some(path) = pending.pop() {
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if metadata.permissions().mode() & 0o077 != 0 {
+            wide.push(path.clone());
+        }
+        if metadata.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&path) {
+                pending.extend(entries.flatten().map(|entry| entry.path()));
+            }
+        }
+    }
+    let ok = wide.is_empty();
+    Check {
+        name: "store_permissions".into(),
+        ok,
+        detail: if ok {
+            "owner-only".into()
+        } else {
+            format!("{} path(s) allow group or other access", wide.len())
+        },
+        hint: if ok {
+            String::new()
+        } else {
+            format!("run: chmod -R go-rwx {}", root.display())
+        },
+    }
+}
+
+#[cfg(not(unix))]
+fn check_store_permissions() -> Check {
+    Check {
+        name: "store_permissions".into(),
+        ok: true,
+        detail: "not checked on this platform".into(),
+        hint: String::new(),
+    }
+}
+
+fn check_codex_freshness() -> Check {
+    let age_days = crate::store::sweeps_path()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
+        .map(|age| age.as_secs() / 86_400);
+    let ok = age_days.is_some_and(|days| days <= 7);
+    Check {
+        name: "adapter:codex:freshness".into(),
+        ok,
+        detail: age_days
+            .map(|days| format!("last sweep state update {days} day(s) ago"))
+            .unwrap_or_else(|| "no sweep state found".into()),
+        hint: if ok {
+            String::new()
+        } else {
+            "run: papercut sweep; schedule it periodically with cron or a user timer".into()
+        },
+    }
+}
+
+fn check_codex_format() -> Check {
+    let coverage = crate::adapters::codex::coverage_probe();
+    let ok = coverage.unsupported_exec_records == 0;
+    Check {
+        name: "adapter:codex:format".into(),
+        ok,
+        detail: format!(
+            "{} supported exec record(s), {} unsupported exec record(s); {} observable and {} opaque custom result(s) in recent logs",
+            coverage.supported_exec_records,
+            coverage.unsupported_exec_records,
+            coverage.observable_custom_results,
+            coverage.opaque_custom_results,
+        ),
+        hint: if !ok {
+            "update papercut's Codex adapter against the installed log format".into()
+        } else if coverage.opaque_custom_results > 0 {
+            "Codex omitted child exit codes from some custom results; run papercut install --yes to refresh the result-preservation instruction".into()
+        } else {
+            String::new()
+        },
+    }
+}
+
 fn format_doctor(checks: &[Check], healthy: bool) -> String {
     let mut out = String::new();
     out.push_str(if healthy {
@@ -300,8 +402,9 @@ fn format_doctor(checks: &[Check], healthy: bool) -> String {
     for c in checks {
         let mark = if c.ok { "ok  " } else { "FAIL" };
         out.push_str(&format!("[{mark}] {:<22} {}\n", c.name, c.detail));
-        if !c.ok && !c.hint.is_empty() {
-            out.push_str(&format!("        hint: {}\n", c.hint));
+        if !c.hint.is_empty() {
+            let label = if c.ok { "note" } else { "hint" };
+            out.push_str(&format!("        {label}: {}\n", c.hint));
         }
     }
     out.trim_end().to_string()

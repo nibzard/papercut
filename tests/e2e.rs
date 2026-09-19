@@ -38,7 +38,7 @@ fn fresh_home_install_add_render() {
     let (c, _, _) = run(&["install", "--yes"]);
     assert_eq!(c, 0);
     let claude_md = std::fs::read_to_string(env.home.join(".claude/CLAUDE.md")).unwrap();
-    assert!(claude_md.contains("papercut:begin v2"));
+    assert!(claude_md.contains("papercut:begin v3"));
 
     // add records an event and prints the id in text mode.
     let (c, out, err) = run(&["add", "shell ate my glob"]);
@@ -91,6 +91,44 @@ fn add_in_non_repo_dir_still_records() {
         ev.context.repo.is_none(),
         "no repo metadata outside a git repo"
     );
+}
+
+#[test]
+fn close_records_resolution_metadata_and_stats() {
+    let _env = IsolatedEnv::new();
+    let (code, output, _) = run(&["add", "verified friction"]);
+    assert_eq!(code, 0);
+    let id = output.trim();
+
+    let (code, output, error) = run(&[
+        "--output",
+        "json",
+        "close",
+        id,
+        "--status",
+        "fixed",
+        "--reason",
+        "verified in a focused test",
+        "--ref",
+        "abc1234",
+        "--remedy",
+        "earlier-validation",
+    ]);
+    assert_eq!(code, 0, "stderr: {error}");
+    let envelope: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(envelope["data"]["status"], "fixed");
+    assert_eq!(
+        envelope["data"]["resolution"]["remedy"],
+        "earlier_validation"
+    );
+    assert!(envelope["data"]["resolution"]["resolved_at"].is_string());
+
+    let (code, output, _) = run(&["--output", "json", "stats"]);
+    assert_eq!(code, 0);
+    let stats: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(stats["data"]["terminal"], 1);
+    assert_eq!(stats["data"]["remedies"]["earlier_validation"], 1);
+    assert!(stats["data"]["median_resolution_seconds"].is_number());
 }
 
 #[test]

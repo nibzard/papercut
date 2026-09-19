@@ -226,7 +226,10 @@ mod md_tests {
         assert_eq!(span, "`foo ## evil - fake`");
         // A backtick-bearing multiline value is fenced AND single-lined.
         let span2 = md_code_span("echo\n`whoami`");
-        assert!(!span2.contains('\n'), "no newline in backtick span: {span2}");
+        assert!(
+            !span2.contains('\n'),
+            "no newline in backtick span: {span2}"
+        );
         assert!(span2.starts_with("`` ") && span2.ends_with(" ``"));
     }
 }

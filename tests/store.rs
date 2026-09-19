@@ -154,3 +154,48 @@ fn reopened_event_keeping_resolution_loads() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].status, papercut::model::Status::Open);
 }
+
+#[test]
+fn invalid_events_directory_is_reported() {
+    let _env = IsolatedEnv::new();
+    let root = papercut::paths::data_root().unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("events"), "not a directory").unwrap();
+
+    let (events, skipped) = papercut::store::read_all_events();
+    assert!(events.is_empty());
+    assert_eq!(skipped.len(), 1);
+    assert!(skipped[0].reason.contains("events directory"));
+}
+
+#[cfg(unix)]
+#[test]
+fn store_files_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env = IsolatedEnv::new();
+    let event = common::test_event("pc_01K000000000000000000000D", "private");
+    let path = papercut::store::write_event(&event).unwrap();
+    assert_eq!(path.metadata().unwrap().permissions().mode() & 0o077, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn signal_files_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env = IsolatedEnv::new();
+    let signal = papercut::signal::Signal::new(
+        "2026-09-19T00:00:00Z",
+        None,
+        None,
+        Some("codex".into()),
+        "false",
+        1,
+        Some("failed"),
+        Some("s1".into()),
+    );
+    papercut::signal::append_signal("codex", "s1", &signal).unwrap();
+    let path = papercut::signal::session_file("codex", "s1").unwrap();
+    assert_eq!(path.metadata().unwrap().permissions().mode() & 0o077, 0);
+}
