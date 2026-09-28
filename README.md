@@ -13,12 +13,18 @@ published into a repo unless you explicitly ask for it.
 
 ## Quick start
 
-From this checkout, with Rust and Cargo installed:
+With Rust and Cargo installed:
+
+```sh
+cargo install papercut-cli
+papercut install --yes
+papercut doctor
+```
+
+Or from this checkout:
 
 ```sh
 cargo install --path . --locked
-papercut install --yes
-papercut doctor
 ```
 
 `install` adds a short reporting instruction to detected agents' global instruction
