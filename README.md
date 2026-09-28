@@ -1,5 +1,7 @@
 # papercut
 
+![papercut: agent friction as cuts on a page, grouped by triage threads and closed with stitches](docs/cover.png)
+
 Coding agents often solve the same avoidable problem twice. One session discovers that
 `npm run verify` needs `uv`, works around it, and moves on. The next session hits the
 same dead end. **papercut saves that friction while the details are fresh, so you can
