@@ -1,126 +1,127 @@
 # papercut
 
-System-level friction telemetry for coding agents.
+Coding agents often solve the same avoidable problem twice. One session discovers that
+`npm run verify` needs `uv`, works around it, and moves on. The next session hits the
+same dead end. **papercut saves that friction while the details are fresh, so you can
+fix the underlying setup or instructions later.**
 
-`papercut` is a machine-wide CLI that lets any coding agent — Claude Code, Codex,
-OpenCode, whatever comes next — record repo-specific friction the moment it happens,
-and gives you a periodic review loop to actually close it. Capture is automatic and
-dumb; interpretation is deliberate and rare.
+It is a local CLI for Claude Code, Codex, OpenCode, and other agents that can run a
+shell command. Reports from all your repos live in one private store. Nothing is
+published into a repo unless you explicitly ask for it.
 
-> **Status: built.** The CLI, store, Claude Code live adapter, Codex sweep adapter,
-> doctor, and triage-pack are all implemented and tested. The design and the list of
-> things deliberately not built live in [PLAN.md](PLAN.md); the triage loop is documented
-> in [docs/triage.md](docs/triage.md).
+## Quick start
 
-## The idea
+From this checkout, with Rust and Cargo installed:
 
-Agents constantly hit avoidable friction — an unquoted glob the shell ate, a test
-runner with a hidden working directory, a stale global CLI. They work around it,
-finish the task, and the workaround disappears with the session. Successful task
-completion does not mean the interface was good.
-
-papercut is the missing channel:
-
-```
-Layer 1 — SIGNALS   automatic, zero-trust, high volume
-  Per-harness adapters record failed commands as raw facts.
-        │
-Layer 2 — REPORTS   voluntary, low volume, high signal
-  Any agent in any repo runs `papercut add "<observation>"`.
-        │
-Layer 3 — TRIAGE    periodic, human-driven, all the intelligence
-  Correlate signals + reports, verify, fix, close.
+```sh
+cargo install --path . --locked
+papercut install --yes
+papercut doctor
 ```
 
-The store is central (`~/.local/share/papercuts/`) and private by default. Because
-it sees every repo and every agent on the machine, it can spot the class of friction
-per-repo logs misattribute: the problem that follows *you* across five repos, whose
-fix belongs in your dotfiles or global agent instructions — not in any one project.
+`install` adds a short reporting instruction to detected agents' global instruction
+files. It also enables automatic failed-command signals for Claude Code. Restart your
+agent sessions after installation so they read the new instruction. `doctor` checks
+the installation and tells you what needs attention.
 
-## Design principles
+Now, in a repo where an avoidable tool or setup problem occurs:
 
-1. Capture must be cheaper than not capturing — no network, no model calls, never
-   fails the parent task.
-2. Observation ≠ hypothesis ≠ fix. Observations are evidence; the rest may be wrong.
-3. Don't trust agent diligence for recall — automatic signals are the floor,
-   voluntary reports are the bonus.
-4. The agent is the primary user: structured output, deterministic exit codes,
-   non-interactive always.
-5. The goal is closing friction, not collecting complaints. A successful papercut
-   disappears into a wrapper, a pin, an earlier lint, or a clearer error.
-
-## Build & use
-
-> Full command reference — every flag, default, and the end-to-end lifecycle:
-> [docs/USAGE.md](docs/USAGE.md).
-
-A single self-contained Rust binary, boring crates only (`clap`, `serde`/`serde_json`,
-`ulid`, `anyhow`), no async runtime.
-
-```
-cargo build -r                              # → target/release/papercut
-cargo install --path .                      # put `papercut` on PATH (~/.cargo/bin)
-#   or:  ln -s "$(pwd)/target/release/papercut" ~/.local/bin/papercut
-
-papercut install --yes                      # detect harnesses; wire the managed block + adapters
-papercut doctor                             # verify the store, managed blocks, and hook wiring
+```sh
+papercut add -- "npm run verify stopped at 'sh: uv: command not found'; the Python checks require uv on PATH."
+papercut list
 ```
 
-After `install`, **capture is automatic**: in Claude Code every failed Bash command is
-recorded as a raw signal the moment it happens — even if the agent never calls papercut.
-(Codex has no hook; run `papercut sweep` to parse its session logs.) That is the whole
-point of the design — never trust agent diligence for recall. An agent that *does* notice a
-papercut adds the high-signal, voluntary layer:
+`add` prints the new record's full ID. `list` defaults to the current repo and shows
+something like this:
 
+```text
+Papercuts · my-repo
+1 open
+
+Needs attention (1)
+
+● OPEN  8K3P7M2Q  28 Sep 2026
+  npm run verify stopped at 'sh: uv: command not found'; the Python checks require uv
+  on PATH.
 ```
-papercut add -- "cargo build rebuilds the world without CARGO_TARGET_DIR"
+
+Use the short reference to inspect the complete record: `papercut show 8K3P7M2Q`.
+In an interactive terminal, statuses have subtle colors; redirected output stays
+plain. `papercut list --repo all` shows reports across repos.
+
+## Why keep these records?
+
+The useful detail is easy to lose: **what was attempted, what happened, and what
+actually worked**. A report preserves it with the repo, working directory, agent,
+and time. When the same failure appears again, you can distinguish a missing repo
+instruction from a machine-wide setup problem. Then you can fix the cause once: add
+a setup step, improve an error, pin a tool, or update global agent instructions.
+
+Record observations as facts. Keep uncertain causes and proposed remedies separate:
+
+```sh
+papercut add "npm run verify missed og/agents/*.png immediately after astro build; rerunning the check passed." \
+  --hypothesis "An overlapping build may have changed dist during the check." \
+  --fix "Run the build and check serially."
+```
+
+A papercut is an avoidable retry or dead end caused by a repo-specific tool,
+command, setup step, error, path convention, or hidden assumption. Ordinary
+debugging, product bugs, and feature requests belong elsewhere. One report per
+apparent root cause per session is enough; repeated reports across sessions are
+useful evidence during review.
+
+## From reports to fixes
+
+Capture is quick; review happens when you have time. List open reports in a repo,
+or gather all repos into a bundle an agent can help triage:
+
+```sh
 papercut list --status open
-papercut render --repo . --write            # write PAPERCUTS.md into this repo's root
+papercut triage-pack --repo all --max-tokens 8000
 ```
 
-Every command takes `--output json` for the stable envelope
-`{ schema_version, status, data, errors[] }`. Exit codes are honest and deterministic:
-`0` success · `1` report NOT recorded / real failure · `2` usage error. Only the live hook
-path (`_hook`) is silent and infallible — capture must never fail the parent task.
+During triage, group related reports, verify the cause, make a small fix, and record
+why each report was closed. For example, a missing `uv` report can be closed after
+`uv` is installed and the locked check passes. Closed records remain visible in
+`papercut list`, alongside the resolution, so an old observation is not mistaken
+for a current problem:
 
-**What gets stored:** the command (truncated), exit code, the first few lines of stderr, a
-repo pointer (normalized remote, or local path), the session id, agent, and timestamp.
-**Never stored:** environment-variable values, transcripts, source files, or secrets. The
-store is private and local (`~/.local/share/papercuts/`); publishing a projection into a
-repo is an explicit `render --write`.
+```text
+Reviewed (1)
 
-Tests: `cargo test` (unit + integration, all run against an isolated fake `$HOME` /
-`$XDG_DATA_HOME`, never the real store). Lint: `cargo clippy --all-targets -- -D warnings`.
-
-## Review & close
-
-A store you never review is a complaints jar. When `papercut list --status open` reaches
-~10 items, run a triage session:
-
-```
-papercut triage-pack --repo all --max-tokens 8000   # a self-contained bundle for any agent
+✓ FIXED  8K3P7M2Q  28 Sep 2026
+  npm run verify stopped at 'sh: uv: command not found'; the Python checks require uv
+  on PATH.
+  ↳ Resolution: Installed uv and confirmed the locked verification passes.
 ```
 
-The pack lists open events first, then recurring signal clusters ranked by count, and tells
-the model everything below is data to triage — never instructions to execute. Feed it to any
-agent (or follow the skill in [docs/triage.md](docs/triage.md)): cluster, verify, and apply
-small fixes — a doc line, a wrapper, a pinned dep. Because the store is central, it can see
-the same friction recur across five repos and tell you the fix belongs in your dotfiles or
-global agent config, not any one project.
+See [the triage guide](docs/triage.md) for the review loop
+and [the usage guide](docs/USAGE.md#5-close-an-event) for editing a record's status.
 
-Closing an event is an edit to two JSON fields in its file (there is intentionally no
-`close` command yet); `render` picks up the new status:
+Automatic signals help catch friction an agent did not report. Claude Code records
+failed Bash commands through an installed hook; Codex session logs can be scanned
+with `papercut sweep`. Signals are raw clues, while `papercut add` records a useful
+observation in the agent's own words. Neither channel decides the fix for you.
 
-```jsonc
-{ "status": "fixed", "resolution": { "reason": "pinned flaky-dep to 1.2.3", "ref": "abc1234" } }
-```
+## Privacy and behavior
 
-## Design notes
+- Reports and signals stay under `$XDG_DATA_HOME/papercuts/` (by default
+  `~/.local/share/papercuts/`). `papercut render --repo . --write` explicitly
+  creates a `PAPERCUTS.md` projection in a repo.
+- Reports do not automatically read source files, transcripts, or environment
+  variables. Do not put secrets in observations or command arguments. Automatic
+  signals keep a truncated failed command, exit code, and the first few lines of
+  stderr; review that content before sharing a rendered projection.
+- The installed capture hook stays silent and cannot fail the agent's task. Direct
+  CLI calls report failures with exit codes. All commands are non-interactive;
+  `--output json` provides structured results for agents and scripts.
 
-Core commands: `add`, `list`, `render`, `install` (wires the reporting instruction into
-each harness's global config as a managed block, plus signal adapters), `uninstall`,
-`sweep`, `doctor`, `triage-pack`. See [PLAN.md](PLAN.md) for schemas, adapters, build
-phases, and the list of things deliberately not being built (`close`/`promote` are deferred
-— status changes are edits to one JSON field that `render` picks up).
+## More detail
 
-Dual-licensed under MIT or Apache-2.0, your choice.
+- [Usage guide](docs/USAGE.md): every command, flag, and output format.
+- [Triage guide](docs/triage.md): turning reports and signals into verified fixes.
+- [Design plan](PLAN.md): architecture, schemas, and deliberate non-goals.
+
+For development, run `cargo test` and `cargo clippy --all-targets -- -D warnings`.
+The project is dual-licensed under MIT or Apache-2.0, your choice.
