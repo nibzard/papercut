@@ -15,10 +15,23 @@ papercut triage-pack --repo . --max-tokens 8000
 papercut show <id>                          # inspect a complete report from the pack
 ```
 
-The pack is token-budget-aware and self-contained: open events first, then recurring
-signal clusters ranked by count. Events are human reports (higher signal); signal clusters
-are automatic facts (higher recall). A cluster with **no** matching report is itself a
-finding — silent recurring friction.
+The pack is token-budget-aware: included reports preserve their full observation,
+hypothesis, suggested fix, and context. Whole reports that exceed the remaining budget
+are omitted with a count and the first omitted ID. Inspect omitted records with `show`,
+narrow the repo scope, or raise the budget. JSON output carries the same bundle in
+`data.markdown`, alongside included and omitted counts.
+
+Reports appear first, followed by signal clusters ranked by count. Signal clusters group
+commands by their first command word; their counts can cover different failures and
+expected non-zero probes. The pack includes date ranges, exit-code counts, known session
+counts, and up to three distinct command/exit/stderr examples per group. Missing session
+IDs are counted separately. Under a limited budget, about a third of the space is
+reserved for signals so a large report backlog cannot use all of it; unused space is
+shared between sections.
+
+A cluster with **no** matching report is a candidate for investigation. Examples are
+illustrative, and the pack states when additional combinations are omitted. Check raw
+signals before treating the group as one recurring failure.
 
 ## Invariants (the skill must not violate these)
 
@@ -40,9 +53,10 @@ finding — silent recurring friction.
    (recurrence counts across sessions/repos). Merge near-duplicates into one working item;
    keep the others as corroborating evidence.
 
-2. **Find silent friction.** Flag signal clusters that have **no** report. A failure
-   repeated across sessions/repos that no agent bothered to report is high-signal: the
-   workaround is so routine it's invisible.
+2. **Find silent friction.** Inspect signal clusters that have **no** report. Establish
+   whether the commands encountered an avoidable obstacle or intentionally returned
+   non-zero. Distinguish repeated attempts in one session from recurrence across sessions
+   and repos; the displayed count alone does not establish a shared root cause.
 
 3. **Verify.** Reproduce the failure where practical, in the repo and at the sha the event
    names. Treat reproduction failure as information, not as reason to delete the event.

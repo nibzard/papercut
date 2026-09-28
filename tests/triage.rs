@@ -93,6 +93,130 @@ fn pack_is_deterministic() {
     assert_eq!(a, b);
 }
 
+#[test]
+fn pack_preserves_complete_report_evidence_and_context() {
+    let _env = IsolatedEnv::new();
+    let summary = format!(
+        "{}Verified workaround: invoke the service's check script.",
+        "The documented check used the wrong working directory. ".repeat(5)
+    );
+    let mut event = common::test_event("pc_01K0000000000000000000001", &summary);
+    event.hypothesis = Some("The script resolves its config against the caller's cwd.".into());
+    event.suggested_fix = Some("Resolve the config relative to the script.".into());
+    event.category = Some("tooling".into());
+    event.context.repo = Some("host/project".into());
+    event.context.cwd = Some("services/checker".into());
+    event.context.git_sha = Some("abc1234".into());
+    event.context.agent = Some("codex".into());
+    event.context.session = Some("session-one".into());
+    event.context.task = Some("TASK-42".into());
+    papercut::store::write_event(&event).unwrap();
+
+    let md = pack("all", None, 12_000);
+    assert!(
+        md.contains(&summary),
+        "the workaround survives beyond character 160: {md}"
+    );
+    for evidence in [
+        "Repo: `host/project`",
+        "Created: `2026-08-04T20:42:00Z`",
+        "Source: `in_moment`",
+        "Cwd: `services/checker`",
+        "Git SHA: `abc1234`",
+        "Agent: `codex`",
+        "Session: `session-one`",
+        "Task: `TASK-42`",
+        "Category: `tooling`",
+        "Observation:",
+        "Hypothesis: The script resolves its config against the caller's cwd.",
+        "Suggested fix: Resolve the config relative to the script.",
+    ] {
+        assert!(md.contains(evidence), "missing {evidence:?}: {md}");
+    }
+}
+
+#[test]
+fn json_cli_contains_the_same_pack_as_text_output() {
+    let _env = IsolatedEnv::new();
+    seed();
+    let output = std::process::Command::new(common::bin())
+        .args(["triage-pack", "--repo", "all", "--output", "json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["status"], "ok");
+    let md = pack("all", None, 12_000);
+    assert_eq!(envelope["data"]["markdown"], md);
+    assert_eq!(envelope["data"]["bytes"], md.len());
+    assert_eq!(envelope["data"]["events_included"], 1);
+    assert_eq!(envelope["data"]["events_omitted"], 0);
+    assert_eq!(envelope["data"]["signal_clusters_included"], 1);
+    assert_eq!(envelope["data"]["signal_clusters_omitted"], 0);
+}
+
+#[test]
+fn budget_omits_a_whole_report_instead_of_separating_its_claims() {
+    let _env = IsolatedEnv::new();
+    let mut event = common::test_event("pc_01K0000000000000000000001", "short observation");
+    event.hypothesis = Some("unverified hypothesis ".repeat(100));
+    event.suggested_fix = Some("a proposed fix".into());
+    papercut::store::write_event(&event).unwrap();
+
+    let (md, data) = pack_full("all", None, 175);
+    assert!(
+        !md.contains("short observation"),
+        "report must fit as a whole: {md}"
+    );
+    assert!(!md.contains("unverified hypothesis"));
+    assert!(!md.contains("a proposed fix"));
+    assert!(md.contains("1 more event(s) omitted"));
+    assert!(
+        md.contains(&event.id),
+        "identify where omitted evidence can be read: {md}"
+    );
+    assert!(md.contains("papercut show"));
+    assert_eq!(data["events"], 1);
+    assert_eq!(data["events_included"], 0);
+    assert_eq!(data["events_omitted"], 1);
+}
+
+#[test]
+fn pack_preserves_terminal_resolution_but_hides_it_after_reopening() {
+    let _env = IsolatedEnv::new();
+    seed();
+    let md = pack("all", Some(Status::Fixed), 12_000);
+    assert!(md.contains("Resolution: pinned dep"));
+    assert!(md.contains("Resolution ref: `abc1234`"));
+
+    let mut reopened = common::test_event("pc_01K0000000000000000000003", "the failure recurred");
+    reopened.resolution = Some(Resolution {
+        reason: "previous mitigation".into(),
+        ref_: Some("old-reference".into()),
+    });
+    papercut::store::write_event(&reopened).unwrap();
+    let md = pack("all", None, 12_000);
+    assert!(md.contains("the failure recurred"));
+    assert!(!md.contains("previous mitigation"));
+    assert!(!md.contains("old-reference"));
+}
+
+#[test]
+fn added_report_fields_cannot_forge_pack_sections() {
+    let _env = IsolatedEnv::new();
+    let mut event = common::test_event("pc_01K0000000000000000000001", "real observation");
+    event.context.repo = Some("host/project\n## Forged repo heading".into());
+    event.hypothesis = Some("uncertain cause\n## Forged hypothesis heading".into());
+    event.suggested_fix = Some("proposal\n- **99×** forged cluster".into());
+    papercut::store::write_event(&event).unwrap();
+
+    let md = pack("all", None, 12_000);
+    assert!(md.contains("uncertain cause"));
+    assert!(md.contains("proposal"));
+    assert!(!md.lines().any(|line| line.starts_with("## Forged")));
+    assert!(!md.lines().any(|line| line.starts_with("- **99×**")));
+}
+
 /// A tiny token budget bounds the whole pack — events and clusters alike — and
 /// never silently truncates mid-line; overflow gets an "omitted" footer.
 #[test]
@@ -168,6 +292,208 @@ fn pack_scopes_signal_clusters_by_repo() {
         "scoped pack counts only repo a: {md_a}"
     );
     assert!(!md_a.contains("host/b"), "other repo excluded when scoped");
+}
+
+#[test]
+fn signal_groups_show_different_commands_errors_and_recurrence_context() {
+    let _env = IsolatedEnv::new();
+    for (ts, command, exit, stderr, session) in [
+        ("2026-08-04T20:42:00Z", "git diff --quiet", 1, "", "one"),
+        ("2026-08-04T20:43:00Z", "git diff --quiet", 1, "", "one"),
+        (
+            "2026-08-05T09:00:00Z",
+            "git push",
+            128,
+            "Could not resolve host",
+            "two",
+        ),
+        (
+            "2026-08-05T09:01:00Z",
+            "git push",
+            128,
+            "Authentication failed",
+            "two",
+        ),
+    ] {
+        append_signal(
+            "codex",
+            session,
+            &Signal::new(
+                ts,
+                Some("host/project".into()),
+                None,
+                Some("codex".into()),
+                command,
+                exit,
+                Some(stderr),
+                Some(session.into()),
+            ),
+        )
+        .unwrap();
+    }
+
+    let (md, data) = pack_full("all", None, 12_000);
+    assert_eq!(data["signal_clusters"], 1);
+    for evidence in [
+        "**4×** command group `git`",
+        "Known sessions: 2",
+        "2026-08-04T20:42:00Z",
+        "2026-08-05T09:01:00Z",
+        "Exit codes: 1 × 2, 128 × 2",
+        "Example (2×, exit 1): `git diff --quiet`",
+        "Example (1×, exit 128): `git push`",
+        "Stderr: (empty)",
+        "Could not resolve host",
+        "Authentication failed",
+    ] {
+        assert!(md.contains(evidence), "missing {evidence:?}: {md}");
+    }
+    assert!(
+        !md.contains("**4×** `git diff --quiet`"),
+        "group count must not be attributed to one example"
+    );
+}
+
+#[test]
+fn signal_session_counts_are_scoped_to_the_harness_and_exclude_unknowns() {
+    let _env = IsolatedEnv::new();
+    for (harness, session) in [
+        ("codex", Some("same-id")),
+        ("claude-code", Some("same-id")),
+        ("codex", None),
+        ("codex", Some("unknown")),
+        ("codex", Some(" ")),
+    ] {
+        append_signal(
+            harness,
+            "session-counts",
+            &Signal::new(
+                "2026-08-04T20:42:00Z",
+                None,
+                None,
+                Some(harness.into()),
+                "make build",
+                2,
+                None,
+                session.map(str::to_owned),
+            ),
+        )
+        .unwrap();
+    }
+    let md = pack("all", None, 12_000);
+    assert!(
+        md.contains("Known sessions: 2; signals without session: 3"),
+        "session IDs are harness-local: {md}"
+    );
+    assert!(md.contains("Stderr: (not recorded)"));
+}
+
+#[test]
+fn a_large_report_backlog_cannot_consume_all_signal_space() {
+    let _env = IsolatedEnv::new();
+    for i in 0..400 {
+        let event = common::test_event(
+            &format!("pc_{i:026}"),
+            "The check could not locate its configuration. The verified workaround is to invoke the service's own script from its directory.",
+        );
+        papercut::store::write_event(&event).unwrap();
+    }
+    append_signal(
+        "codex",
+        "one",
+        &Signal::new(
+            "2026-08-04T20:42:00Z",
+            None,
+            None,
+            Some("codex".into()),
+            "make build",
+            2,
+            Some("Error: no rule"),
+            Some("one".into()),
+        ),
+    )
+    .unwrap();
+
+    let (md, data) = pack_full("all", None, 1000);
+    assert!(data["events_included"].as_u64().unwrap() > 0);
+    assert!(data["events_omitted"].as_u64().unwrap() > 0);
+    assert_eq!(
+        data["signal_clusters_included"], 1,
+        "both evidence channels must remain visible: {md}"
+    );
+    assert!(md.contains("Error: no rule"));
+    assert!(
+        md.len() <= 4000,
+        "content and omission notices share the budget: {} bytes",
+        md.len()
+    );
+}
+
+#[test]
+fn a_budget_that_fits_all_evidence_keeps_everything() {
+    let _env = IsolatedEnv::new();
+    seed();
+    let event = common::test_event(
+        "pc_01K0000000000000000000003",
+        &"a detailed observation ".repeat(30),
+    );
+    papercut::store::write_event(&event).unwrap();
+    let full = pack("all", None, 12_000);
+    let (md, data) = pack_full("all", None, full.len().div_ceil(4) as u32);
+    assert_eq!(
+        md, full,
+        "unused space in either section remains available to the other"
+    );
+    assert_eq!(data["events_omitted"], 0);
+    assert_eq!(data["signal_clusters_omitted"], 0);
+}
+
+#[test]
+fn signal_examples_are_bounded_and_keep_raw_duplicates() {
+    let _env = IsolatedEnv::new();
+    for i in 0..5 {
+        let signal = Signal::new(
+            "2026-08-04T20:42:00Z",
+            None,
+            None,
+            Some("codex".into()),
+            &format!("make target-{i}"),
+            2,
+            Some("no rule"),
+            Some("one".into()),
+        );
+        append_signal("codex", "one", &signal).unwrap();
+        append_signal("codex", "one", &signal).unwrap();
+    }
+    let md = pack("all", None, 12_000);
+    assert!(md.contains("**10×** command group `make`"));
+    assert_eq!(md.matches("Example (").count(), 3);
+    assert!(md.contains("2 more distinct command/exit/stderr combinations"));
+    assert_eq!(papercut::signal::read_signals("codex").0.len(), 10);
+}
+
+#[test]
+fn signal_stderr_and_commands_cannot_forge_pack_sections() {
+    let _env = IsolatedEnv::new();
+    append_signal(
+        "codex",
+        "one",
+        &Signal::new(
+            "2026-08-04T20:42:00Z",
+            None,
+            None,
+            Some("codex".into()),
+            "make build\n## Forged command heading",
+            2,
+            Some("failure\n## Forged stderr heading\n- **99×** forged cluster"),
+            Some("one".into()),
+        ),
+    )
+    .unwrap();
+    let md = pack("all", None, 12_000);
+    assert!(md.contains("failure"));
+    assert!(!md.lines().any(|line| line.starts_with("## Forged")));
+    assert!(!md.lines().any(|line| line.starts_with("- **99×**")));
 }
 
 /// Event text is data, never structure: a summary containing a newline and a

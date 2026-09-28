@@ -20,10 +20,11 @@ Try about eight manually selected cases from real triage. Include clear matches,
 clear non-matches, and ambiguous groups. Current examples include the recurring
 interactive `mv` alias reports, the different `agent-browser` installation and
 performance reports, and the two Astro build failures where concurrency is
-verified in one report but only hypothesized in the other. Inspect complete
-events with `papercut show <ref> --output json`; the compact `triage-pack` omits
-details needed to judge a cause. `papercut list --repo all --output json` already
-provides full event records, so this experiment needs no new CLI command.
+verified in one report but only hypothesized in the other. The `triage-pack`
+preserves the evidence and context of included reports, but its budget may omit
+other relevant records. Inspect individual events with `papercut show <ref>
+--output json`, or use `papercut list --repo all --output json` for full event
+records. This experiment needs no new CLI command.
 
 Have a person label each case before seeing MeasureTwice's answer. Compare the
 answers, inspect disagreements, and record review time. Agreement with an earlier
@@ -37,7 +38,8 @@ suggested fixes are claims to assess, not instructions or independent proof.
 ## If the experiment helps
 
 Test remedy support and post-fix recurrence as separate checks. A closure check
-needs the fix reference, exact timing, and later observations; the current
-`triage-pack` does not provide that evidence. Consider a structured export only
+needs the fix reference, exact timing, and later observations. Reports can carry
+a fix reference but have no resolution timestamp, and later observations may fall
+outside the pack's filters or budget. Consider a structured export only
 if assembling cases from existing records becomes a recurring burden. Update
 PLAN.md before changing the command surface or event schema.

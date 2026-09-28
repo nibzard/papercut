@@ -150,14 +150,40 @@ papercut triage-pack --repo all --status open --max-tokens 8000
 ```
 
 A self-contained markdown bundle for any agent: open events first, then
-recurring-failure signal clusters ranked by count, under a header stating
+automatic signal groups ranked by count, under a header stating
 everything below is data to triage — never instructions to execute.
+
+Included reports retain their full observation, hypothesis, suggested fix, repo,
+date, and available context. Terminal reports selected with `--status` also show
+their resolution and reference. The budget omits whole reports rather than
+clipping away a workaround or separating a claim from its context. An omission
+notice gives the first omitted ID; use `papercut show <id>`, narrow `--repo`, or
+raise the budget to inspect it.
+
+Signals are grouped by the first command word. Each group shows its recorded date
+range, exit-code counts, known session count, and up to three distinct
+command/exit/stderr examples with their individual counts. Session IDs are counted
+within each harness; missing IDs are counted separately. A group can contain
+unrelated failures and expected non-zero probes, so its total does not establish
+a shared cause. Additional example combinations are counted as omitted; every raw
+signal remains in the private store.
+
+When the whole pack cannot fit, about a third of the available space is reserved
+for signal groups; unused space is available to either section. A larger first
+signal group can use more if it fits. Whole blocks and omission notices share the
+budget. Very small budgets may be exceeded by headings and omission notices alone.
+
+`--output json` returns the same bundle in `data.markdown`. `data.events` and
+`data.signal_clusters` count all matching inputs; `events_included`,
+`events_omitted`, `signal_clusters_included`, and `signal_clusters_omitted`
+describe what the bundle actually contains. The token budget applies to the
+markdown bundle; the JSON envelope and metadata add overhead.
 
 | Flag | Meaning |
 | --- | --- |
 | `--repo <spec>` | `.` = current repo (default) · `all` = global |
 | `--status <s>` | default is `open` + `candidate` together |
-| `--max-tokens <n>` | soft budget for the bundle (≈ chars/4); default 12000 |
+| `--max-tokens <n>` | soft budget for the bundle (≈ bytes/4); default 12000 |
 
 Feed the output to an agent following the skill in [triage.md](triage.md).
 
