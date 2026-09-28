@@ -133,6 +133,7 @@ observation in the agent's own words. Neither channel decides the fix for you.
 - [Usage guide](docs/USAGE.md): every command, flag, and output format.
 - [Triage guide](docs/triage.md): turning reports and signals into verified fixes.
 - [Design plan](PLAN.md): architecture, schemas, and deliberate non-goals.
+- [Release rules](RELEASES.md): how a version is tagged, pushed, and published.
 
 For development, run `cargo test` and `cargo clippy --all-targets -- -D warnings`.
 The project is MIT-licensed; see [LICENSE](LICENSE).
