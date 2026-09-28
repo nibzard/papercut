@@ -1,5 +1,8 @@
 # papercut
 
+[![crates.io](https://img.shields.io/crates/v/papercut-cli.svg)](https://crates.io/crates/papercut-cli)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 ![papercut: agent friction as cuts on a page, grouped by triage threads and closed with stitches](docs/cover.png)
 
 Coding agents often solve the same avoidable problem twice. One session discovers that
@@ -132,4 +135,4 @@ observation in the agent's own words. Neither channel decides the fix for you.
 - [Design plan](PLAN.md): architecture, schemas, and deliberate non-goals.
 
 For development, run `cargo test` and `cargo clippy --all-targets -- -D warnings`.
-The project is dual-licensed under MIT or Apache-2.0, your choice.
+The project is MIT-licensed; see [LICENSE](LICENSE).
