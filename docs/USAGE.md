@@ -87,10 +87,22 @@ id in both text and `--output json` so the agent can reference it later.
 
 ```
 papercut list --repo . --status open --since 7 --agent claude-code
+papercut show pc_01K000000000000000000000A
 papercut render --repo . --write
 ```
 
-**`list`** — a filtered listing.
+**`list`** — a filtered, human-readable listing. The header counts records by
+status. `Needs attention` contains open and candidate records; `Reviewed`
+contains the rest. Each record shows its status, a short reference, date, and
+full observation, followed by any hypothesis, suggested fix, or resolution.
+Use the short reference with `papercut show <ref>`. A repo-scoped listing names
+the repo once; `--repo all` names the repo on each record. When every record
+has the same agent, the agent appears once in the header. An empty repo view
+points to `--repo all`. Text wraps at `COLUMNS` when set (32–120 columns), or
+at 88 columns otherwise. Status colors appear only on an interactive terminal;
+`NO_COLOR` or `TERM=dumb` disables them. Redirected text stays plain.
+`--output json` returns complete structured records and full IDs in the same
+order.
 
 | Flag | Meaning |
 | --- | --- |
@@ -98,6 +110,16 @@ papercut render --repo . --write
 | `--status <s>` | `open` \| `candidate` \| `fixed` \| `promoted` \| `duplicate` \| `dismissed` |
 | `--agent <id>` | only events from this agent |
 | `--since <days>` | only events from the last N days |
+
+**`show <id-or-ref>`** — inspect a single event by its full ID from `add` or a
+unique short `Ref` from `list`. A short reference is a case-insensitive suffix
+of the ID; if it matches more than one event, use a longer suffix or full ID.
+Text output displays the full observation, any hypothesis and suggested fix,
+context, and resolution. `--output json` returns the complete event in
+`data.event`. A missing or unreadable event exits 1 with a structured error;
+an ambiguous reference exits 2. The reference is unique across the whole store,
+including events from other repos.
+`show` never changes the store.
 
 **`render`** — regenerate the deterministic markdown projection.
 
@@ -174,6 +196,7 @@ their markers.
 | --- | --- | --- |
 | `add <msg>` | record one event | `--task --category --agent --hypothesis --fix` |
 | `list` | filtered listing | `--repo --status --agent --since` |
+| `show <id-or-ref>` | inspect one full event | — |
 | `render` | markdown projection | `--repo --write` |
 | `install` | wire harnesses | `--yes` (required) `--harness` |
 | `uninstall` | remove wiring | `--harness` |

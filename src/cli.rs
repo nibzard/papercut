@@ -21,6 +21,7 @@ use crate::output::OutputMode;
                   $ papercut add 'docs build needs -dmflag'\n\
                   $ papercut add 'flaky test' --task PROJ-42 --category tooling --output json\n\
                   $ papercut list --repo . --status open --since 7\n\
+                  $ papercut show 0000000A\n\
                   $ papercut render --write\n\
                   $ papercut install --yes\n\
                   $ papercut doctor\n\
@@ -43,6 +44,9 @@ pub enum Command {
 
     /// List events, filterable by repo / status / agent / age.
     List(ListArgs),
+
+    /// Inspect one complete event by its full ID or unique short reference.
+    Show(ShowArgs),
 
     /// Regenerate a deterministic markdown projection of the store.
     Render(RenderArgs),
@@ -114,6 +118,12 @@ pub struct ListArgs {
     /// Only events from the last N days.
     #[arg(long)]
     pub since: Option<u32>,
+}
+
+#[derive(clap::Args)]
+pub struct ShowArgs {
+    /// Full ID from `papercut add` or short Ref from `papercut list`.
+    pub id: String,
 }
 
 #[derive(clap::Args)]

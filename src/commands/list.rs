@@ -2,10 +2,12 @@
 
 use crate::app::RunResult;
 use crate::cli::ListArgs;
-use crate::paths::resolve_repo_filter;
+use crate::model::Status;
+use crate::paths::{resolve_repo_filter, RepoScope};
 use crate::query::{current_repo, Filters};
-use crate::util::{md_single_line, truncate, SKIPPED_LIST_MAX, SKIPPED_REASON_MAX};
+use crate::util::{append_wrapped, md_single_line, truncate, SKIPPED_LIST_MAX, SKIPPED_REASON_MAX};
 use serde_json::json;
+use std::io::IsTerminal;
 
 pub fn run(args: ListArgs) -> RunResult {
     let cur = current_repo();
@@ -16,36 +18,219 @@ pub fn run(args: ListArgs) -> RunResult {
         agent: args.agent,
         since_days: args.since,
     };
-    let (events, skipped) = crate::query::load(&filters);
+    let (mut events, skipped) = crate::query::load(&filters);
+    events.sort_by(|left, right| {
+        status_order(left.status)
+            .cmp(&status_order(right.status))
+            .then_with(|| left.id.cmp(&right.id))
+    });
 
     let data = json!({
         "events": events,
         "count": events.len(),
         "skipped": skipped,
     });
-    let text = render_text(&events, &skipped);
+    let color = should_color(
+        std::io::stdout().is_terminal(),
+        std::env::var("TERM").ok().as_deref(),
+        std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()),
+    );
+    let text = render_text(&events, &skipped, &filters.scope, color);
     RunResult::Ok { data, text }
 }
 
-fn render_text(events: &[crate::model::Event], skipped: &[crate::store::SkippedFile]) -> String {
+fn render_text(
+    events: &[crate::model::Event],
+    skipped: &[crate::store::SkippedFile],
+    scope: &RepoScope,
+    color: bool,
+) -> String {
     if events.is_empty() {
-        let mut s = String::from("no events");
+        let mut s = match scope {
+            RepoScope::One(repo) => format!(
+                "No papercuts for {}.\nRun `papercut list --repo all` to see all repos.",
+                md_single_line(repo)
+            ),
+            RepoScope::All => "No papercuts found.".to_string(),
+        };
         append_skipped(&mut s, skipped);
         return s;
     }
-    let mut out = String::new();
-    for e in events {
-        let repo = e.context.repo.as_deref().unwrap_or("(global)");
-        out.push_str(&format!(
-            "{}  {:9} {}  {}\n",
-            md_single_line(&e.id),
-            e.status.label(),
-            truncate(&md_single_line(repo), 40),
-            truncate(&md_single_line(&e.summary), 72),
+    let all_ids: Vec<String> = crate::store::read_all_events()
+        .0
+        .into_iter()
+        .map(|event| event.id)
+        .collect();
+    let name = match scope {
+        RepoScope::One(repo) => repo.rsplit('/').next().unwrap_or(repo),
+        RepoScope::All => "all repos",
+    };
+    let mut out = format!(
+        "{}\n",
+        styled(&format!("Papercuts · {}", md_single_line(name)), "1", color)
+    );
+    let breakdown = [
+        Status::Open,
+        Status::Candidate,
+        Status::Fixed,
+        Status::Promoted,
+        Status::Duplicate,
+        Status::Dismissed,
+    ]
+    .into_iter()
+    .filter_map(|status| {
+        let count = events.iter().filter(|event| event.status == status).count();
+        (count > 0).then(|| format!("{count} {}", status.label()))
+    })
+    .collect::<Vec<_>>()
+    .join(" · ");
+    out.push_str(&breakdown);
+    out.push('\n');
+    let common_agent = events
+        .first()
+        .and_then(|first| first.context.agent.as_deref())
+        .filter(|agent| {
+            events
+                .iter()
+                .all(|event| event.context.agent.as_deref() == Some(*agent))
+        });
+    if let Some(agent) = common_agent {
+        out.push_str(&styled(
+            &format!("by {}\n", md_single_line(agent)),
+            "2",
+            color,
         ));
+    }
+    let active_count = events
+        .iter()
+        .take_while(|event| !event.status.is_terminal())
+        .count();
+    let (active, reviewed) = events.split_at(active_count);
+    for (section, entries) in [("Needs attention", active), ("Reviewed", reviewed)] {
+        if entries.is_empty() {
+            continue;
+        }
+        out.push_str(&format!(
+            "\n{}\n",
+            styled(&format!("{section} ({})", entries.len()), "1", color)
+        ));
+        for event in entries {
+            append_event(
+                &mut out,
+                event,
+                scope,
+                &all_ids,
+                common_agent.is_some(),
+                color,
+            );
+        }
     }
     append_skipped(&mut out, skipped);
     out.trim_end().to_string()
+}
+
+fn append_event(
+    out: &mut String,
+    event: &crate::model::Event,
+    scope: &RepoScope,
+    all_ids: &[String],
+    common_agent: bool,
+    color: bool,
+) {
+    let (mark, color_code) = match event.status {
+        Status::Open => ("●", "33"),
+        Status::Candidate => ("◇", "36"),
+        Status::Fixed => ("✓", "32"),
+        Status::Promoted => ("↗", "34"),
+        Status::Duplicate => ("≈", "2"),
+        Status::Dismissed => ("×", "2"),
+    };
+    let status = format!("{mark} {}", event.status.label().to_ascii_uppercase());
+    let reference = crate::id::short_ref(&event.id, all_ids);
+    let mut metadata = format!(
+        "{}  {}",
+        md_single_line(&reference),
+        display_date(&event.created_at)
+    );
+    if !common_agent {
+        if let Some(agent) = &event.context.agent {
+            metadata.push_str(&format!("  ·  {}", md_single_line(agent)));
+        }
+    }
+    out.push_str(&format!(
+        "\n{}  {}\n",
+        styled(&status, color_code, color),
+        styled(&metadata, "2", color)
+    ));
+    append_wrapped(out, "  ", &event.summary);
+    if let Some(hypothesis) = &event.hypothesis {
+        append_wrapped(out, "  ? Hypothesis: ", hypothesis);
+    }
+    if let Some(fix) = &event.suggested_fix {
+        append_wrapped(out, "  → Suggested fix: ", fix);
+    }
+    if event.status.is_terminal() {
+        if let Some(resolution) = &event.resolution {
+            append_wrapped(out, "  ↳ Resolution: ", &resolution.reason);
+        }
+    }
+    if let RepoScope::All = scope {
+        out.push_str(&format!(
+            "  Repo: {}\n",
+            md_single_line(event.context.repo.as_deref().unwrap_or("(unknown)"))
+        ));
+    }
+    if let Some(category) = &event.category {
+        out.push_str(&format!("  Category: {}\n", md_single_line(category)));
+    }
+    if let Some(task) = &event.context.task {
+        out.push_str(&format!("  Task: {}\n", md_single_line(task)));
+    }
+}
+
+fn display_date(created_at: &str) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let Some(date) = created_at.get(..10) else {
+        return md_single_line(created_at);
+    };
+    let mut parts = date.split('-');
+    let (Some(year), Some(month), Some(day), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return md_single_line(created_at);
+    };
+    let (Ok(month), Ok(day)) = (month.parse::<usize>(), day.parse::<u8>()) else {
+        return md_single_line(created_at);
+    };
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return md_single_line(created_at);
+    }
+    format!("{day} {} {year}", MONTHS[month - 1])
+}
+
+fn should_color(terminal: bool, term: Option<&str>, no_color: bool) -> bool {
+    terminal && !term.is_some_and(|value| value.eq_ignore_ascii_case("dumb")) && !no_color
+}
+
+fn styled(value: &str, code: &str, color: bool) -> String {
+    if color {
+        format!("\x1b[{code}m{value}\x1b[0m")
+    } else {
+        value.to_string()
+    }
+}
+
+fn status_order(status: Status) -> u8 {
+    match status {
+        Status::Open => 0,
+        Status::Candidate => 1,
+        Status::Fixed => 2,
+        Status::Promoted => 3,
+        Status::Duplicate => 4,
+        Status::Dismissed => 5,
+    }
 }
 
 /// Append a human-readable list of skipped (quarantined) event files with the
@@ -56,6 +241,9 @@ fn render_text(events: &[crate::model::Event], skipped: &[crate::store::SkippedF
 fn append_skipped(out: &mut String, skipped: &[crate::store::SkippedFile]) {
     if skipped.is_empty() {
         return;
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
     }
     out.push_str(&format!(
         "({} unreadable event file(s) skipped)\n",
@@ -84,19 +272,30 @@ mod tests {
 
     #[test]
     fn empty_listing() {
-        assert_eq!(render_text(&[], &[]), "no events");
+        assert_eq!(
+            render_text(&[], &[], &RepoScope::All, false),
+            "No papercuts found."
+        );
+        let scoped = render_text(
+            &[],
+            &[],
+            &RepoScope::One("github.com/foo/bar".into()),
+            false,
+        );
+        assert!(scoped.contains("No papercuts for github.com/foo/bar"));
+        assert!(scoped.contains("papercut list --repo all"));
         let skipped = vec![SkippedFile {
             file: "pc_01KGARBAGE0000000000000Z.json".into(),
             reason: "parse error:EOF".into(),
             repo: None,
         }];
-        let txt = render_text(&[], &skipped);
+        let txt = render_text(&[], &skipped, &RepoScope::All, false);
         assert!(txt.contains("1 unreadable event file(s) skipped"));
         assert!(txt.contains("pc_01KGARBAGE0000000000000Z.json: parse error:EOF"));
     }
 
     #[test]
-    fn one_per_line() {
+    fn scoped_report_prioritizes_full_observation() {
         let e = crate::model::Event {
             schema_version: 1,
             id: "pc_01K000000000000000000000A".into(),
@@ -113,17 +312,20 @@ mod tests {
             },
             resolution: None,
         };
-        let txt = render_text(std::slice::from_ref(&e), &[]);
-        assert!(txt.contains("pc_01K000000000000000000000A"));
-        assert!(txt.contains("open"));
-        assert!(txt.contains("github.com/foo/bar"));
-        assert_eq!(txt.lines().count(), 1);
+        let txt = render_text(
+            std::slice::from_ref(&e),
+            &[],
+            &RepoScope::One("github.com/foo/bar".into()),
+            false,
+        );
+        assert!(txt.contains("● OPEN  0000000A  4 Aug 2026"));
+        assert!(txt.contains("Papercuts · bar"));
+        assert!(txt.find("● OPEN") < txt.find("glob ate my args"));
     }
 
-    /// A multiline summary must not forge extra rows — `list` is one event per
-    /// line, so embedded newlines collapse onto the single row.
+    /// A multiline summary must remain prose inside its record.
     #[test]
-    fn multiline_summary_stays_one_line() {
+    fn multiline_summary_stays_in_one_record() {
         let e = crate::model::Event {
             schema_version: 1,
             id: "pc_01K000000000000000000000B".into(),
@@ -137,13 +339,9 @@ mod tests {
             context: EventContext::default(),
             resolution: None,
         };
-        let txt = render_text(std::slice::from_ref(&e), &[]);
-        assert_eq!(
-            txt.lines().count(),
-            1,
-            "multiline summary collapses to one row: {txt}"
-        );
-        assert!(txt.contains("first line") && txt.contains("second line"));
+        let txt = render_text(std::slice::from_ref(&e), &[], &RepoScope::All, false);
+        assert!(txt.contains("first line second line"));
+        assert_eq!(txt.matches("● OPEN").count(), 1);
     }
 
     /// A skipped-file reason containing embedded markdown (a newline + heading,
@@ -157,7 +355,7 @@ mod tests {
             reason: "parse error\n## forged heading\n- forged bullet".into(),
             repo: None,
         }];
-        let txt = render_text(&[], &skipped);
+        let txt = render_text(&[], &skipped, &RepoScope::All, false);
         let bullets: Vec<&str> = txt.lines().filter(|l| l.starts_with("  - pc_")).collect();
         assert_eq!(bullets.len(), 1, "one collapsed skipped bullet: {txt}");
         assert!(
@@ -170,12 +368,9 @@ mod tests {
         );
     }
 
-    /// An event whose `id` carries an embedded newline (a non-ULID id the lenient
-    /// loader admits, since it validates only status/resolution — not id format)
-    /// must NOT forge extra rows or a heading in the one-event-per-line listing.
-    /// The id is neutralized like every other field.
+    /// An event whose `id` carries an embedded newline must not forge a heading.
     #[test]
-    fn id_with_embedded_newline_stays_one_row() {
+    fn id_with_embedded_newline_cannot_forge_heading() {
         let e = crate::model::Event {
             schema_version: 1,
             id: "pc_evil\n## forged\n- bullet".into(),
@@ -189,15 +384,43 @@ mod tests {
             context: EventContext::default(),
             resolution: None,
         };
-        let txt = render_text(std::slice::from_ref(&e), &[]);
-        assert_eq!(
-            txt.lines().count(),
-            1,
-            "id newline collapses to one row: {txt}"
-        );
+        let txt = render_text(std::slice::from_ref(&e), &[], &RepoScope::All, false);
         assert!(
             !txt.lines().any(|l| l.trim_start().starts_with("## ")),
             "no forged heading from the id: {txt}"
         );
+    }
+
+    #[test]
+    fn full_summary_and_separate_optional_fields() {
+        let mut e = crate::model::Event {
+            schema_version: 1,
+            id: "pc_01K000000000000000000000C".into(),
+            created_at: "2026-08-04T20:42:00Z".into(),
+            source: Source::InMoment,
+            status: Status::Open,
+            summary: "word ".repeat(50),
+            hypothesis: Some("It might be a stale cache".into()),
+            suggested_fix: Some("Clear the cache".into()),
+            category: None,
+            context: EventContext::default(),
+            resolution: None,
+        };
+        let txt = render_text(std::slice::from_ref(&e), &[], &RepoScope::All, false);
+        assert_eq!(txt.matches("word").count(), 50);
+        assert!(txt.contains("Hypothesis: It might be a stale cache"));
+        assert!(txt.contains("Suggested fix: Clear the cache"));
+        e.context.repo = Some("github.com/foo/bar".into());
+        let global = render_text(&[e], &[], &RepoScope::All, false);
+        assert!(global.contains("Repo: github.com/foo/bar"));
+    }
+
+    #[test]
+    fn color_is_tty_only_and_respects_no_color() {
+        assert!(should_color(true, Some("xterm-256color"), false));
+        assert!(!should_color(false, Some("xterm-256color"), false));
+        assert!(!should_color(true, Some("dumb"), false));
+        assert!(!should_color(true, Some("xterm"), true));
+        assert_eq!(styled("● OPEN", "33", true), "\x1b[33m● OPEN\x1b[0m");
     }
 }

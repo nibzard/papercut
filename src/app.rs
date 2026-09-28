@@ -69,6 +69,7 @@ pub fn run(cli: Cli) -> i32 {
     let res = match cli.command {
         Command::Add(a) => commands::add::run(a),
         Command::List(a) => commands::list::run(a),
+        Command::Show(a) => commands::show::run(a),
         Command::Render(a) => commands::render::run(a),
         Command::Install(a) => commands::install::run(a),
         Command::Uninstall(a) => commands::uninstall::run(a),

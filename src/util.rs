@@ -75,6 +75,42 @@ pub fn md_single_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Wrap an untrusted prose field for terminal output without losing words.
+/// Whitespace is collapsed so embedded newlines cannot forge extra fields.
+pub fn append_wrapped(out: &mut String, prefix: &str, value: &str) {
+    let width = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.clamp(32, 120))
+        .unwrap_or(88);
+    append_wrapped_at_width(out, prefix, value, width);
+}
+
+fn append_wrapped_at_width(out: &mut String, prefix: &str, value: &str, width: usize) {
+    let prefix_width = prefix.chars().count();
+    let continuation = " ".repeat(prefix_width);
+    let mut line = prefix.to_string();
+    let mut line_len = prefix_width;
+    for word in md_single_line(value).split_whitespace() {
+        let word_len = word.chars().count();
+        if line_len > prefix_width && line_len + 1 + word_len > width {
+            out.push_str(&line);
+            out.push('\n');
+            line = continuation.clone();
+            line_len = prefix_width;
+        }
+        if line_len > prefix_width {
+            line.push(' ');
+            line_len += 1;
+        }
+        line.push_str(word);
+        line_len += word_len;
+    }
+    out.push_str(&line);
+    out.push('\n');
+}
+
 /// Prefix every line of `s` after the first with `indent`, so multiline free
 /// text rendered under a bullet or section can never start a line at column 0.
 /// A forged `## heading` or peer `- item` becomes an indented continuation that
@@ -126,6 +162,20 @@ mod md_tests {
         assert_eq!(md_single_line("a\nb\t c"), "a b c");
         assert_eq!(md_single_line("plain"), "plain");
         assert_eq!(md_single_line("  \n "), "");
+    }
+
+    #[test]
+    fn wraps_without_dropping_words_at_narrow_width() {
+        let mut out = String::new();
+        append_wrapped_at_width(&mut out, "  ", "one two three four five six", 16);
+        assert_eq!(out, "  one two three\n  four five six\n");
+    }
+
+    #[test]
+    fn wraps_after_unicode_prefix_at_display_width() {
+        let mut out = String::new();
+        append_wrapped_at_width(&mut out, "  ↳ Resolution: ", "one two three four", 26);
+        assert_eq!(out, "  ↳ Resolution: one two\n                three four\n");
     }
 
     #[test]

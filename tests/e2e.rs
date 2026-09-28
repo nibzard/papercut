@@ -56,7 +56,9 @@ fn fresh_home_install_add_render() {
     // list shows both.
     let (c, out, _) = run(&["list"]);
     assert_eq!(c, 0);
-    assert_eq!(out.lines().count(), 2);
+    assert!(out.contains("2 open"));
+    assert!(out.contains("shell ate my glob"));
+    assert!(out.contains("second report"));
 
     // render is deterministic markdown.
     let (c, out, _) = run(&["render"]);

@@ -88,7 +88,8 @@ Core commands:
 | Command | Purpose |
 | --- | --- |
 | `papercut add "<msg>"` | Write one event file. Message required; everything else inferred or optional (`--task`, `--category`, `--agent`, `--hypothesis`, `--fix`). |
-| `papercut list [--repo .] [--status open]` | Human/agent-readable listing, filterable by repo, status, age, agent. |
+| `papercut list [--repo .] [--status open]` | Human-readable listing with complete observations, store-unique short references, a status breakdown, active and reviewed sections, and resolution reasons for terminal events. JSON keeps full IDs and the same event ordering. A scoped empty view explains how to view all repos. Filterable by repo, status, age, agent. |
+| `papercut show <id-or-ref>` | Read one event by its exact full ID or unique case-insensitive ID suffix. Text displays every stored field; JSON returns the complete event in the standard envelope. An unknown ID is a real read failure (exit 1); an ambiguous suffix is a usage error (exit 2). |
 | `papercut render [--repo .]` | Regenerate a markdown projection (`PAPERCUTS.md` when run inside a repo, global view otherwise). Deterministic output. |
 | `papercut install` | Detect installed harnesses; write the reporting instruction into each one's **global** instructions file as an idempotent managed block; wire up available signal adapters. |
 | `papercut uninstall` | Remove all managed blocks and adapters cleanly. |
@@ -98,6 +99,13 @@ Core commands:
 
 Deferred until hand-editing hurts twice: `close`, `promote`, `dedupe` as commands —
 status changes are edits to one JSON field, and `render` picks them up.
+Text listings may use restrained ANSI styling only on a real terminal with
+`TERM` other than `dumb` and without a nonempty `NO_COLOR`. Plain text and JSON
+must remain readable without color. Styling and status marks never alter stored
+events or the JSON envelope; no terminal UI dependency is needed.
+Do not add a comment stream without recurring triage cases that need follow-up
+history beyond the existing observation, hypothesis, suggested fix, and resolution
+fields. Such a change would require an explicit schema and plan revision.
 
 ### Central store
 

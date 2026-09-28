@@ -12,6 +12,7 @@ The loop — not the log — is the product. An unreviewed store is a complaints
 papercut triage-pack --repo all            # open + candidate events, and signal clusters
 papercut triage-pack --repo all --status open
 papercut triage-pack --repo . --max-tokens 8000
+papercut show <id>                          # inspect a complete report from the pack
 ```
 
 The pack is token-budget-aware and self-contained: open events first, then recurring
@@ -91,7 +92,8 @@ Rules enforced by `Event::validate`:
 - Every terminal status (`fixed`, `promoted`, `duplicate`, `dismissed`) requires a
   non-empty `resolution.reason`.
 - `fixed` additionally requires a non-empty `resolution.ref` (where the fix landed).
-- A non-terminal event (`open`, `candidate`) must **not** carry a resolution.
+- A non-terminal event (`open`, `candidate`) may retain a previous resolution
+  when reopened; the active status determines how the event is projected.
 
 Promote a `candidate` cluster into a tracked item by writing a new event (or editing an
 existing `candidate` event) with `source: "triage"`. After closing, regenerate the
