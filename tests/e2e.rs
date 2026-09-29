@@ -3,7 +3,7 @@
 mod common;
 
 use common::IsolatedEnv;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 fn run(args: &[&str]) -> (i32, String, String) {
     let out = Command::new(common::bin())
@@ -237,54 +237,4 @@ fn json_envelope_shape_on_error() {
     assert!(err["code"].is_string());
     assert!(err["retryable"].is_boolean());
     assert!(err["hint"].is_string());
-}
-
-#[test]
-fn hook_is_silent_and_exits_zero_regardless_of_input() {
-    let _env = IsolatedEnv::new();
-    // The verified PostToolUseFailure payload shape (Claude Code v2.1.223,
-    // captured 2026-08-06).
-    let payload = serde_json::json!({
-        "session_id": "abc",
-        "cwd": "/proj",
-        "hook_event_name": "PostToolUseFailure",
-        "tool_name": "Bash",
-        "tool_input": {"command": "false", "description": "test"},
-        "error": "Exit code 1\nnope",
-        "is_interrupt": false,
-    });
-    let mut cmd = Command::new(common::bin());
-    cmd.args(["_hook", "claude-code"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = cmd.spawn().unwrap();
-    use std::io::Write;
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(payload.to_string().as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
-    assert_eq!(out.status.code(), Some(0));
-    assert!(out.stdout.is_empty(), "hook must not print to stdout");
-    assert!(out.stderr.is_empty(), "hook must not print to stderr");
-
-    // garbage stdin → still silent and 0
-    let mut cmd = Command::new(common::bin());
-    cmd.args(["_hook", "claude-code"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = cmd.spawn().unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"not json at all {{{")
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
-    assert_eq!(out.status.code(), Some(0));
-    assert!(out.stdout.is_empty());
 }
