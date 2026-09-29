@@ -101,6 +101,7 @@ pub fn test_event(id: &str, summary: &str) -> papercut::model::Event {
         created_at: "2026-08-04T20:42:00Z".into(),
         source: Source::InMoment,
         status: Status::Open,
+        product: None,
         summary: summary.into(),
         hypothesis: None,
         suggested_fix: None,

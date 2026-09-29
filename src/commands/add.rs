@@ -5,7 +5,7 @@ use crate::cli::AddArgs;
 use crate::detect::detect;
 use crate::git_meta;
 use crate::id::new_id;
-use crate::model::{Event, EventContext, Source, Status, SCHEMA_VERSION};
+use crate::model::{Event, EventContext, Product, Source, Status, SCHEMA_VERSION};
 use crate::output::ErrorItem;
 use crate::store::{ensure_store, write_event};
 use crate::time::now_rfc3339;
@@ -18,8 +18,31 @@ pub fn run(args: AddArgs) -> RunResult {
             "empty_message",
             "message is empty",
             false,
-            "papercut add \"<what you were doing, what got in the way>\"",
+            "papercut add --product <id> -- \"<what you were doing, what got in the way>\"",
         ));
+    }
+
+    let product_id = args.product.trim();
+    if product_id.is_empty() {
+        return RunResult::usage(ErrorItem::new(
+            "missing_product",
+            "a designated product ID is required",
+            false,
+            "use --product <id> from the task's product designation",
+        ));
+    }
+    for (name, value) in [
+        ("product-version", &args.product_version),
+        ("surface", &args.surface),
+    ] {
+        if value.as_ref().is_some_and(|v| v.trim().is_empty()) {
+            return RunResult::usage(ErrorItem::new(
+                "blank_product_field",
+                format!("--{name} cannot be blank"),
+                false,
+                format!("provide a value for --{name} or omit it"),
+            ));
+        }
     }
 
     if let Err(e) = ensure_store() {
@@ -41,6 +64,11 @@ pub fn run(args: AddArgs) -> RunResult {
         created_at: now_rfc3339(),
         source: Source::InMoment,
         status: Status::Open,
+        product: Some(Product {
+            id: product_id.to_string(),
+            version: args.product_version.as_ref().map(|v| v.trim().to_string()),
+            surface: args.surface.as_ref().map(|v| v.trim().to_string()),
+        }),
         summary: summary.to_string(),
         hypothesis: args.hypothesis.clone().filter(|s| !s.is_empty()),
         suggested_fix: args.fix.clone().filter(|s| !s.is_empty()),

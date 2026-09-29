@@ -12,7 +12,7 @@
 //! mid-write leaves no partial event. Reading is lenient: malformed event
 //! files are skipped and reported, never fatal.
 
-use crate::model::{Event, SCHEMA_VERSION};
+use crate::model::{Event, LEGACY_SCHEMA_VERSION, SCHEMA_VERSION};
 use crate::paths::data_root;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -58,6 +58,14 @@ pub(crate) fn create_private_dir(path: &Path) -> anyhow::Result<()> {
 /// file. On failure the temp file is removed (best-effort) so it cannot
 /// accumulate.
 pub(crate) fn write_atomic(final_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    write_atomic_with_permissions(final_path, bytes, None)
+}
+
+fn write_atomic_with_permissions(
+    final_path: &Path,
+    bytes: &[u8],
+    permissions: Option<std::fs::Permissions>,
+) -> anyhow::Result<()> {
     let name = final_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -67,11 +75,35 @@ pub(crate) fn write_atomic(final_path: &Path, bytes: &[u8]) -> anyhow::Result<()
         let _ = std::fs::remove_file(&tmp_path);
         return Err(e).with_context(|| format!("write temp file {}", tmp_path.display()));
     }
+    if let Some(permissions) = permissions {
+        if let Err(e) = std::fs::set_permissions(&tmp_path, permissions) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e).with_context(|| format!("set permissions on {}", tmp_path.display()));
+        }
+    }
     if let Err(e) = std::fs::rename(&tmp_path, final_path) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(e).with_context(|| format!("commit {}", final_path.display()));
     }
     Ok(())
+}
+
+/// Atomic update of a managed user file while preserving an existing symlink.
+/// Renaming over the link would disconnect a stowed instructions/settings file.
+pub(crate) fn write_managed_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let destination = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => std::fs::canonicalize(path)
+            .with_context(|| format!("resolve managed symlink {}", path.display()))?,
+        Ok(_) => path.to_path_buf(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(e) => return Err(e).with_context(|| format!("inspect {}", path.display())),
+    };
+    let permissions = match std::fs::metadata(&destination) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).with_context(|| format!("inspect {}", destination.display())),
+    };
+    write_atomic_with_permissions(&destination, bytes, permissions)
 }
 
 /// Atomically write an event to `events/<id>.json` (pretty JSON).
@@ -98,6 +130,8 @@ pub struct SkippedFile {
     pub reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product: Option<String>,
 }
 
 impl SkippedFile {
@@ -154,6 +188,7 @@ fn read_events_in(dir: PathBuf) -> (Vec<Event>, Vec<SkippedFile>) {
                     file: name,
                     reason: format!("read error: {e}"),
                     repo: None,
+                    product: None,
                 });
                 continue;
             }
@@ -165,14 +200,16 @@ fn read_events_in(dir: PathBuf) -> (Vec<Event>, Vec<SkippedFile>) {
                 // resolution invariant. Validate on load and quarantine such
                 // events into `skipped` rather than feeding them to triage or
                 // render as if they were sound.
-                if ev.schema_version != SCHEMA_VERSION {
+                if ev.schema_version != SCHEMA_VERSION && ev.schema_version != LEGACY_SCHEMA_VERSION
+                {
                     skipped.push(SkippedFile {
                         file: name,
                         reason: format!(
-                            "schema version {} not supported (this build reads {})",
-                            ev.schema_version, SCHEMA_VERSION
+                            "schema version {} not supported (this build reads {} and {})",
+                            ev.schema_version, LEGACY_SCHEMA_VERSION, SCHEMA_VERSION
                         ),
                         repo: ev.context.repo.clone(),
+                        product: ev.attributed_product().map(|p| p.id.clone()),
                     });
                     continue;
                 }
@@ -181,6 +218,7 @@ fn read_events_in(dir: PathBuf) -> (Vec<Event>, Vec<SkippedFile>) {
                         file: name,
                         reason,
                         repo: ev.context.repo.clone(),
+                        product: ev.attributed_product().map(|p| p.id.clone()),
                     });
                     continue;
                 }
@@ -190,6 +228,7 @@ fn read_events_in(dir: PathBuf) -> (Vec<Event>, Vec<SkippedFile>) {
                 file: name,
                 reason: format!("parse error: {e}"),
                 repo: None,
+                product: None,
             }),
         }
     }
@@ -218,6 +257,8 @@ pub struct Config {
     pub installed: Vec<InstalledHarness>,
 }
 
+pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstalledHarness {
     pub harness: String,
@@ -241,17 +282,17 @@ pub fn config_path() -> Option<PathBuf> {
 pub fn read_config() -> Config {
     let Some(path) = config_path() else {
         return Config {
-            schema_version: SCHEMA_VERSION,
+            schema_version: CONFIG_SCHEMA_VERSION,
             installed: vec![],
         };
     };
     match std::fs::read_to_string(path) {
         Ok(t) => serde_json::from_str(&t).unwrap_or_else(|_| Config {
-            schema_version: SCHEMA_VERSION,
+            schema_version: CONFIG_SCHEMA_VERSION,
             installed: vec![],
         }),
         Err(_) => Config {
-            schema_version: SCHEMA_VERSION,
+            schema_version: CONFIG_SCHEMA_VERSION,
             installed: vec![],
         },
     }
@@ -268,6 +309,9 @@ pub fn write_config(cfg: &Config) -> anyhow::Result<()> {
 }
 
 // ── sweeps.json: incremental high-water marks ──────────────────────────────
+
+/// The retained watermark format is independent of the event schema.
+pub const SWEEPS_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sweeps {
@@ -369,7 +413,7 @@ pub fn write_sweeps(s: &Sweeps) -> anyhow::Result<()> {
 impl Default for Sweeps {
     fn default() -> Self {
         Self {
-            schema_version: SCHEMA_VERSION,
+            schema_version: SWEEPS_SCHEMA_VERSION,
             marks: BTreeMap::new(),
         }
     }
@@ -381,6 +425,13 @@ mod tests {
     use crate::model::{EventContext, Source, Status};
     use crate::test_env::EnvGuard;
 
+    #[test]
+    fn watermark_schema_stays_independent_of_event_schema() {
+        assert_eq!(Sweeps::default().schema_version, 1);
+        assert_eq!(CONFIG_SCHEMA_VERSION, 1);
+        assert_eq!(SCHEMA_VERSION, 2);
+    }
+
     fn mk(id: &str) -> Event {
         Event {
             schema_version: SCHEMA_VERSION,
@@ -388,6 +439,11 @@ mod tests {
             created_at: "2026-08-04T20:42:00Z".into(),
             source: Source::InMoment,
             status: Status::Open,
+            product: Some(crate::model::Product {
+                id: "test-product".into(),
+                version: None,
+                surface: None,
+            }),
             summary: "s".into(),
             hypothesis: None,
             suggested_fix: None,

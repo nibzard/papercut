@@ -2,9 +2,7 @@
 
 use crate::app::RunResult;
 use crate::cli::InstallArgs;
-use crate::harness::{
-    detect, filter_detected, unknown_harness_error, DetectedHarness, HarnessTier,
-};
+use crate::harness::{detect, filter_detected, unknown_harness_error, DetectedHarness};
 use crate::managed_block::{self, Action};
 use crate::output::ErrorItem;
 use crate::store::{self, AdapterState, InstalledHarness};
@@ -28,11 +26,6 @@ pub fn run(args: InstallArgs) -> RunResult {
         ));
     }
 
-    let exe = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.to_str().map(str::to_string))
-        .unwrap_or_else(|| "papercut".to_string());
-
     let mut results: Vec<Value> = Vec::new();
     let mut errs: Vec<String> = Vec::new();
     let mut cfg = store::read_config();
@@ -41,7 +34,7 @@ pub fn run(args: InstallArgs) -> RunResult {
         let mut step = json!({
             "harness": h.id,
             "instructions_file": h.instructions_file.to_string_lossy(),
-            "tier": h.tier.label(),
+            "capture_mode": "reports_only",
         });
 
         // 1. Managed block upsert.
@@ -72,13 +65,16 @@ pub fn run(args: InstallArgs) -> RunResult {
         }
         // Atomic write: a racing reader (another install, or the harness
         // itself) must never see a truncated instructions file.
-        if let Err(e) = store::write_atomic(&h.instructions_file, new_content.as_bytes()) {
-            errs.push(format!(
-                "{}: write {}: {e:#}",
-                h.id,
-                h.instructions_file.display()
-            ));
-            continue;
+        if action != Action::Unchanged {
+            if let Err(e) = store::write_managed_file(&h.instructions_file, new_content.as_bytes())
+            {
+                errs.push(format!(
+                    "{}: write {}: {e:#}",
+                    h.id,
+                    h.instructions_file.display()
+                ));
+                continue;
+            }
         }
         step["block"] = json!(match action {
             Action::Inserted => "inserted",
@@ -87,7 +83,7 @@ pub fn run(args: InstallArgs) -> RunResult {
         });
 
         // 2. Adapter wiring.
-        let (adapter, adapter_err) = wire(h, &exe);
+        let (adapter, adapter_err) = wire(h);
         if let Some(e) = adapter_err {
             errs.push(format!("{}: adapter: {e}", h.id));
         }
@@ -105,7 +101,7 @@ pub fn run(args: InstallArgs) -> RunResult {
         });
     }
 
-    cfg.schema_version = crate::model::SCHEMA_VERSION;
+    cfg.schema_version = store::CONFIG_SCHEMA_VERSION;
     if let Err(e) = store::write_config(&cfg) {
         errs.push(format!("config: {e}"));
     }
@@ -137,39 +133,14 @@ pub fn run(args: InstallArgs) -> RunResult {
     }
 }
 
-/// Wire the harness's signal adapter, returning (state, optional error).
-fn wire(h: &DetectedHarness, exe: &str) -> (Option<AdapterState>, Option<String>) {
-    match h.tier {
-        HarnessTier::Live => {
-            // Currently only Claude Code is a live-tier harness.
-            match crate::adapters::claude_code::install_hook(exe) {
-                Ok(_) => (
-                    Some(AdapterState {
-                        kind: "claude-code-hook".into(),
-                        detail: "PostToolUseFailure Bash".into(),
-                    }),
-                    None,
-                ),
-                Err(e) => (None, Some(format!("{e}"))),
-            }
+/// Retire owned broad hooks; this release deliberately uses agent reports.
+fn wire(h: &DetectedHarness) -> (Option<AdapterState>, Option<String>) {
+    if h.id == "claude-code" {
+        if let Err(e) = crate::adapters::claude_code::uninstall_hook() {
+            return (None, Some(format!("remove old broad hook: {e}")));
         }
-        HarnessTier::Sweep => {
-            // Honest wiring claim: report whether the sessions dir actually
-            // exists yet, instead of asserting a state never verified.
-            let detail = match crate::adapters::codex::sessions_root() {
-                Some(root) if root.exists() => "rollout jsonl".to_string(),
-                _ => "rollout jsonl (no sessions dir yet)".to_string(),
-            };
-            (
-                Some(AdapterState {
-                    kind: "codex-sweep".into(),
-                    detail,
-                }),
-                None,
-            )
-        }
-        HarnessTier::None => (None, None),
     }
+    (None, None)
 }
 
 fn format_summary(results: &[Value]) -> String {

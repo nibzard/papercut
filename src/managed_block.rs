@@ -2,7 +2,7 @@
 //! instruction inside a harness's global instructions file.
 //!
 //! Invariant: `install`/`uninstall` only ever touch the whole-line span
-//! between `<!-- papercut:begin v1 -->` and `<!-- papercut:end -->`. Content
+//! between `<!-- papercut:begin v2 -->` and `<!-- papercut:end -->`. Content
 //! outside those markers is preserved byte-for-byte.
 //!
 //! Accepted limitation: inserting into a file whose last line has no trailing
@@ -18,7 +18,7 @@ pub enum Action {
 }
 
 /// Current managed-block version.
-pub const BLOCK_VERSION: u32 = 1;
+pub const BLOCK_VERSION: u32 = 2;
 
 /// The begin marker carries the version so `doctor` can detect staleness.
 pub fn begin_marker(version: u32) -> String {
@@ -30,12 +30,12 @@ pub const END_MARKER: &str = "<!-- papercut:end -->";
 /// The instruction body an agent reads. One report per apparent root cause;
 /// observation first, hypothesis/fix optional; logging never fails the task.
 pub const BLOCK_BODY: &str = concat!(
-    "### Log papercuts\n",
-    "When a repo-specific tool, command, setup step, error message, path convention, cache, or undocumented assumption causes an avoidable retry or dead end, record it immediately:\n",
+    "### Observe designated products with Papercut\n",
+    "When a task or applicable instructions designate a product to observe, record where using its installation, docs, public interface, behavior, or errors causes confusion, retries, a dead end, a misleading result, or an unexpected workaround:\n",
     "\n",
-    "    papercut add -- \"<what you were doing, what got in the way, any verified workaround>\"\n",
+    "    papercut add --product <designated-product-id> -- \"<task and expectation; what happened; any verified workaround>\"\n",
     "\n",
-    "One or two sentences. Facts first; causes and fixes are optional hypotheses (--hypothesis, --fix). One report per apparent root cause per session. Do not log ordinary debugging, accomplishments, product bugs, security issues, or feature requests. If unsure whether it qualifies, log it — triage is cheap. Logging must never interrupt or fail the task.",
+    "Include --product-version and --surface when known. Report relevant struggles even when commands succeed or the task eventually works. Product bugs encountered during use qualify. Exclude unrelated machine/tool failures, ordinary implementation debugging, accomplishments, and speculative requests. Do not infer the product from the working repo. With no designated product, continue without reporting. If relevance to the designated product is uncertain, state the evidence and uncertainty. Keep suspected causes in --hypothesis and proposed remedies in --fix. One report per apparent obstacle per product per session. Never include secrets, transcripts, or source files. Logging must never interrupt or fail the task.",
 );
 
 /// The full block (begin marker + body + end marker), no trailing newline.
@@ -266,7 +266,7 @@ mod tests {
         let stale = format!("<!-- papercut:begin v0 -->\nold body\n{}\n", END_MARKER);
         let (got, action) = upsert(&stale);
         assert_eq!(action, Action::Updated);
-        assert!(got.contains("v1"));
+        assert!(got.contains(&begin_marker(BLOCK_VERSION)));
         assert!(!got.contains("old body"));
     }
 
@@ -366,7 +366,8 @@ mod tests {
         assert_ne!(action, Action::Unchanged);
         assert_eq!(got.matches("papercut:begin").count(), 1);
         assert_eq!(
-            got.matches("### Log papercuts").count(),
+            got.matches("### Observe designated products with Papercut")
+                .count(),
             1,
             "duplicate body removed, not leaked: {got}"
         );

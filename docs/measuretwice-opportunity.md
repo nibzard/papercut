@@ -16,15 +16,15 @@ cause?** Give it three answers:
 - `contradicted`: an observation conflicts with the proposed cause.
 - `insufficient`: the cause is plausible, but the evidence does not establish it.
 
-Try about eight manually selected cases from real triage. Include clear matches,
-clear non-matches, and ambiguous groups. Current examples include the recurring
-interactive `mv` alias reports, the different `agent-browser` installation and
-performance reports, and the two Astro build failures where concurrency is
-verified in one report but only hypothesized in the other. The `triage-pack`
-preserves the evidence and context of included reports, but its budget may omit
-other relevant records. Inspect individual events with `papercut show <ref>
---output json`, or use `papercut list --repo all --output json` for full event
-records. This experiment needs no new CLI command.
+Try about eight manually selected cases from real, product-attributed triage.
+Include clear matches, clear non-matches, and ambiguous groups from tasks using
+the same designated product. Compare observations of the same public surface
+across consumer repos and product versions. The `triage-pack` preserves the
+evidence and context of included reports, but its budget may omit other relevant
+records. Inspect individual events with `papercut show <ref> --output json`, or
+use `papercut list --product <id> --output json` for full event records. This
+experiment needs no new CLI command. Historical environment reports in
+`--unattributed` are outside this product review.
 
 Have a person label each case before seeing MeasureTwice's answer. Compare the
 answers, inspect disagreements, and record review time. Agreement with an earlier

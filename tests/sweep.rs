@@ -335,16 +335,16 @@ fn deleted_file_mark_is_pruned() {
     );
 }
 
-/// `papercut sweep` exits 1 with a structured error when the watermark cannot
-/// be persisted — signals recorded, honesty preserved.
+/// The CLI remains callable but does not scan sessions or touch sweep state
+/// until signals can be attributed to a designated product.
 #[test]
-fn sweep_exits_1_when_watermark_unpersistable() {
+fn sweep_reports_only_does_not_scan_or_advance_watermarks() {
     let env = IsolatedEnv::new().with_codex();
     let f = env.home.join(".codex/sessions/2026/08/04/rollout-wm.jsonl");
     write_rollout(&f, &format!("{META}\n{CALL}\n{OUT_FAIL}\n"));
 
-    // sweeps.json as a DIRECTORY: signal appends succeed, the atomic rename
-    // of the watermark fails.
+    // A directory in place of sweeps.json would make a real sweep fail to
+    // persist its watermark. Reports-only mode must leave it untouched.
     let store_root = env.data.join("papercuts");
     std::fs::create_dir_all(store_root.join("sweeps.json")).unwrap();
 
@@ -352,15 +352,14 @@ fn sweep_exits_1_when_watermark_unpersistable() {
         .args(["--output", "json", "sweep"])
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(1), "watermark failure is exit 1");
+    assert_eq!(out.status.code(), Some(0));
     let env_json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(env_json["status"], "error");
-    assert_eq!(env_json["errors"][0]["code"], "sweep_state_write_failed");
-    assert_eq!(env_json["errors"][0]["retryable"], true);
-    assert_eq!(
-        env_json["data"]["signals_total"], 1,
-        "the signal itself was recorded and reported"
-    );
+    assert_eq!(env_json["status"], "ok");
+    assert_eq!(env_json["data"]["capture_mode"], "reports_only");
+    assert_eq!(env_json["data"]["signals_total"], 0);
+    assert_eq!(env_json["data"]["sessions_scanned"], 0);
+    assert!(store_root.join("sweeps.json").is_dir());
+    assert!(papercut::signal::read_signals("codex").0.is_empty());
 }
 
 #[test]

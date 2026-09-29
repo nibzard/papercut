@@ -21,7 +21,12 @@ fn parallel_adds_all_land_with_unique_ids() {
         let data = env.data.clone();
         handles.push(std::thread::spawn(move || {
             let out = Command::new(&bin)
-                .args(["add", &format!("concurrent report {i}")])
+                .args([
+                    "add",
+                    "--product",
+                    "my-sdk",
+                    &format!("concurrent report {i}"),
+                ])
                 .env("HOME", &home)
                 .env("XDG_DATA_HOME", &data)
                 .output()

@@ -3,17 +3,34 @@
 use crate::app::RunResult;
 use crate::cli::ListArgs;
 use crate::model::Status;
-use crate::paths::{resolve_repo_filter, RepoScope};
-use crate::query::{current_repo, Filters};
+use crate::output::ErrorItem;
+use crate::paths::RepoScope;
+use crate::query::{current_repo, repo_scope, Filters, ProductScope};
 use crate::util::{append_wrapped, md_single_line, truncate, SKIPPED_LIST_MAX, SKIPPED_REASON_MAX};
 use serde_json::json;
 use std::io::IsTerminal;
 
 pub fn run(args: ListArgs) -> RunResult {
+    let product = match ProductScope::from_args(args.product.as_deref(), args.unattributed) {
+        Ok(scope) => scope,
+        Err(message) => {
+            return RunResult::usage(ErrorItem::new(
+                "invalid_product",
+                message,
+                false,
+                "provide a nonblank --product ID",
+            ))
+        }
+    };
     let cur = current_repo();
-    let scope = resolve_repo_filter(Some(args.repo.as_str()), cur.as_deref());
+    let scope = repo_scope(
+        args.repo.as_deref(),
+        cur.as_deref(),
+        args.product.is_some() || args.unattributed,
+    );
     let filters = Filters {
         scope,
+        product,
         status: args.status,
         agent: args.agent,
         since_days: args.since,
@@ -36,6 +53,11 @@ pub fn run(args: ListArgs) -> RunResult {
         std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()),
     );
     let text = render_text(&events, &skipped, &filters.scope, color);
+    let text = match &filters.product {
+        ProductScope::One(id) => format!("Product: {}\n{text}", md_single_line(id)),
+        ProductScope::Unattributed => format!("Unattributed legacy evidence\n{text}"),
+        _ => text,
+    };
     RunResult::Ok { data, text }
 }
 
@@ -163,6 +185,17 @@ fn append_event(
         styled(&metadata, "2", color)
     ));
     append_wrapped(out, "  ", &event.summary);
+    if let Some(product) = event.attributed_product() {
+        out.push_str(&format!("  Product: {}\n", md_single_line(&product.id)));
+        if let Some(version) = &product.version {
+            out.push_str(&format!("  Version: {}\n", md_single_line(version)));
+        }
+        if let Some(surface) = &product.surface {
+            out.push_str(&format!("  Surface: {}\n", md_single_line(surface)));
+        }
+    } else {
+        out.push_str("  Product: (unattributed legacy)\n");
+    }
     if let Some(hypothesis) = &event.hypothesis {
         append_wrapped(out, "  ? Hypothesis: ", hypothesis);
     }
@@ -288,6 +321,7 @@ mod tests {
             file: "pc_01KGARBAGE0000000000000Z.json".into(),
             reason: "parse error:EOF".into(),
             repo: None,
+            product: None,
         }];
         let txt = render_text(&[], &skipped, &RepoScope::All, false);
         assert!(txt.contains("1 unreadable event file(s) skipped"));
@@ -302,6 +336,7 @@ mod tests {
             created_at: "2026-08-04T20:42:00Z".into(),
             source: Source::InMoment,
             status: Status::Open,
+            product: None,
             summary: "glob ate my args".into(),
             hypothesis: None,
             suggested_fix: None,
@@ -332,6 +367,7 @@ mod tests {
             created_at: "2026-08-04T20:42:00Z".into(),
             source: Source::InMoment,
             status: Status::Open,
+            product: None,
             summary: "first line\nsecond line".into(),
             hypothesis: None,
             suggested_fix: None,
@@ -354,6 +390,7 @@ mod tests {
             file: "pc_01KGARBAGE0000000000000Z.json".into(),
             reason: "parse error\n## forged heading\n- forged bullet".into(),
             repo: None,
+            product: None,
         }];
         let txt = render_text(&[], &skipped, &RepoScope::All, false);
         let bullets: Vec<&str> = txt.lines().filter(|l| l.starts_with("  - pc_")).collect();
@@ -377,6 +414,7 @@ mod tests {
             created_at: "2026-08-04T20:42:00Z".into(),
             source: Source::InMoment,
             status: Status::Open,
+            product: None,
             summary: "real".into(),
             hypothesis: None,
             suggested_fix: None,
@@ -399,6 +437,7 @@ mod tests {
             created_at: "2026-08-04T20:42:00Z".into(),
             source: Source::InMoment,
             status: Status::Open,
+            product: None,
             summary: "word ".repeat(50),
             hypothesis: Some("It might be a stale cache".into()),
             suggested_fix: Some("Clear the cache".into()),

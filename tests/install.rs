@@ -53,7 +53,7 @@ fn block_upsert_is_idempotent_and_preserves_user_content() {
     let after = std::fs::read_to_string(env.home.join(".claude/CLAUDE.md")).unwrap();
     assert!(after.contains("# My rules"), "user heading preserved");
     assert!(after.contains("Do good work."), "user body preserved");
-    assert!(after.contains("papercut:begin v1"));
+    assert!(after.contains("papercut:begin v2"));
     assert_eq!(after.matches("papercut:begin").count(), 1);
     let len1 = after.len();
 
@@ -170,7 +170,12 @@ fn concurrent_installs_converge_to_one_block() {
     install(true, None);
     let after = std::fs::read_to_string(env.home.join(".claude/CLAUDE.md")).unwrap();
     assert_eq!(after.matches("papercut:begin").count(), 1);
-    assert_eq!(after.matches("### Log papercuts").count(), 1);
+    assert_eq!(
+        after
+            .matches("### Observe designated products with Papercut")
+            .count(),
+        1
+    );
     assert!(after.contains("# user rules"));
 
     // And uninstall leaves no marker or body behind.
@@ -451,7 +456,7 @@ fn doctor_unhealthy_before_install_healthy_after() {
     let before = doctor_data();
     assert_eq!(before["healthy"], false);
     assert!(!check_ok(&before, "block:claude-code"));
-    assert!(!check_ok(&before, "adapter:claude-code"));
+    assert!(check_ok(&before, "adapter:claude-code"));
 
     install(true, None);
     let after = doctor_data();
@@ -469,7 +474,7 @@ fn doctor_flags_stale_block_version() {
     let p = env.home.join(".claude/CLAUDE.md");
     let c = std::fs::read_to_string(&p)
         .unwrap()
-        .replace("papercut:begin v1", "papercut:begin v0");
+        .replace("papercut:begin v2", "papercut:begin v0");
     std::fs::write(&p, c).unwrap();
 
     let data = doctor_data();
@@ -477,7 +482,7 @@ fn doctor_flags_stale_block_version() {
     assert!(!check_ok(&data, "block:claude-code"));
     assert!(
         check_ok(&data, "adapter:claude-code"),
-        "hook wiring is independent"
+        "absence of broad hook is independent"
     );
 
     // Remediation hints are deterministic for a given failing check.
@@ -491,42 +496,26 @@ fn doctor_flags_stale_block_version() {
 }
 
 #[test]
-fn doctor_flags_missing_hook() {
+fn doctor_accepts_missing_hook() {
     let env = IsolatedEnv::new().with_claude();
     install(true, None);
     let _ = std::fs::remove_file(env.home.join(".claude/settings.json"));
 
     let data = doctor_data();
-    assert_eq!(data["healthy"], false);
-    assert!(!check_ok(&data, "adapter:claude-code"));
+    assert_eq!(data["healthy"], true);
+    assert!(check_ok(&data, "adapter:claude-code"));
     assert!(check_ok(&data, "block:claude-code"), "block is independent");
 }
 
-/// F4: a hook entry that points at a missing executable is a dead hook — doctor
-/// must not call it healthy just because the command substring is present.
+/// An old broad hook is unhealthy regardless of whether its executable works.
 #[test]
-fn doctor_flags_dead_hook_pointing_at_missing_exe() {
-    let env = IsolatedEnv::new().with_claude();
+fn doctor_flags_old_broad_hook() {
+    let _env = IsolatedEnv::new().with_claude();
     install(true, None);
-    // Tamper: keep our entry but retarget its exe token at a path that does not
-    // exist. The command substring is still ours, so a substring-only check
-    // would wrongly report healthy.
-    let settings = env.home.join(".claude/settings.json");
-    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
-    for g in v["hooks"]["PostToolUseFailure"].as_array_mut().unwrap() {
-        for h in g["hooks"].as_array_mut().unwrap() {
-            if h["command"]
-                .as_str()
-                .is_some_and(|c| c.contains("_hook claude-code"))
-            {
-                h["command"] = Value::String("/does/not/exist/papercut _hook claude-code".into());
-            }
-        }
-    }
-    std::fs::write(&settings, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    papercut::adapters::claude_code::install_hook("/does/not/exist/papercut").unwrap();
 
     let data = doctor_data();
-    assert_eq!(data["healthy"], false, "dead-hook exe must be unhealthy");
+    assert_eq!(data["healthy"], false, "broad hook must be unhealthy");
     assert!(!check_ok(&data, "adapter:claude-code"));
     let adapter = data["checks"]
         .as_array()
@@ -538,8 +527,8 @@ fn doctor_flags_dead_hook_pointing_at_missing_exe() {
         adapter["detail"]
             .as_str()
             .unwrap()
-            .contains("missing or non-executable"),
-        "detail must explain the dead exe: {}",
+            .contains("old broad hook remains"),
+        "detail must explain the stale hook: {}",
         adapter["detail"]
     );
 }
@@ -777,7 +766,7 @@ fn harness_filter_restricts_install_and_uninstall() {
 
     // claude-code got the block; codex's file was never created/touched.
     let claude_md = std::fs::read_to_string(env.home.join(".claude/CLAUDE.md")).unwrap();
-    assert!(claude_md.contains("papercut:begin v1"));
+    assert!(claude_md.contains("papercut:begin v2"));
     let codex_md = std::fs::read_to_string(env.home.join(".codex/AGENTS.md")).unwrap_or_default();
     assert!(
         !codex_md.contains("papercut"),

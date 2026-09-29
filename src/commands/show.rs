@@ -76,6 +76,13 @@ fn render_text(event: &Event) -> String {
         event.schema_version,
     );
     append_wrapped(&mut out, "  ", &event.summary);
+    if let Some(product) = event.attributed_product() {
+        append_optional(&mut out, "Product", Some(&product.id));
+        append_optional(&mut out, "Product version", product.version.as_deref());
+        append_optional(&mut out, "Product surface", product.surface.as_deref());
+    } else {
+        out.push_str("Product: (unattributed legacy)\n");
+    }
     if let Some(value) = &event.hypothesis {
         append_wrapped(&mut out, "Hypothesis: ", value);
     }

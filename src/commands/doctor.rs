@@ -55,22 +55,11 @@ pub fn run() -> RunResult {
             checks.push(check_claude_adapter());
         }
         if h.id == "codex" {
-            // Informational: an empty sessions dir is normal on a fresh
-            // Codex install, so absence is reported honestly, not failed.
-            let detail = match crate::adapters::codex::sessions_root() {
-                Some(root) if root.exists() => {
-                    format!("informational: sessions dir present ({})", root.display())
-                }
-                Some(root) => format!(
-                    "informational: sessions dir not found yet ({}); sweep warns until Codex records a session",
-                    root.display()
-                ),
-                None => "informational: no home dir".into(),
-            };
             checks.push(Check {
                 name: "adapter:codex".into(),
                 ok: true,
-                detail,
+                detail: "reports only; sweep suspended until product attribution is reliable"
+                    .into(),
                 hint: String::new(),
             });
         }
@@ -80,6 +69,16 @@ pub fn run() -> RunResult {
     // block orphaned at a previously recorded path (config-dir drift) is
     // invisible to the per-harness checks above and would linger forever.
     let cfg = store::read_config();
+    for entry in &cfg.installed {
+        if entry.adapter.is_some() {
+            checks.push(Check {
+                name: format!("adapter_state:{}", entry.harness),
+                ok: false,
+                detail: "old broad capture recorded in installation config".into(),
+                hint: "run: papercut install --yes".into(),
+            });
+        }
+    }
     let detected_files: Vec<&PathBuf> = detected.iter().map(|h| &h.instructions_file).collect();
     for entry in &cfg.installed {
         let rec = PathBuf::from(&entry.instructions_file);
@@ -175,9 +174,8 @@ fn check_block(name: String, path: &Path) -> Check {
     }
 }
 
-/// Check the Claude Code hook wiring. A corrupt settings.json masks as "hook
-/// missing" through the lenient read path; diagnose the corruption instead
-/// of hinting at install, which refuses to touch an unparseable file.
+/// A reports-only installation has no Papercut Bash hook. Diagnose a stale
+/// entry or settings corruption instead of reporting it as healthy.
 fn check_claude_adapter() -> Check {
     if let Some(reason) = crate::adapters::claude_code::settings_diagnosis() {
         return Check {
@@ -188,17 +186,14 @@ fn check_claude_adapter() -> Check {
         };
     }
     let s = crate::adapters::claude_code::hook_status();
-    let ok = s.present && s.exe_ok;
-    let detail = match (s.present, s.exe_ok) {
-        (true, true) => format!(
-            "PostToolUseFailure Bash hook present (exe: {})",
+    let ok = !s.present;
+    let detail = if s.present {
+        format!(
+            "old broad hook remains (exe: {})",
             s.exe.as_deref().unwrap_or("?")
-        ),
-        (true, false) => format!(
-            "hook points at missing or non-executable: {}",
-            s.exe.as_deref().unwrap_or("?")
-        ),
-        (false, _) => "hook missing".into(),
+        )
+    } else {
+        "reports only; no broad hook installed".into()
     };
     Check {
         name: "adapter:claude-code".into(),
@@ -206,10 +201,8 @@ fn check_claude_adapter() -> Check {
         detail,
         hint: if ok {
             String::new()
-        } else if !s.present {
-            "run: papercut install --yes".into()
         } else {
-            "reinstall papercut, or fix the hook command path".into()
+            "run: papercut install --yes to remove the old hook".into()
         },
     }
 }

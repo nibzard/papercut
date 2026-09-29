@@ -98,6 +98,17 @@ pub struct EventContext {
     pub task: Option<String>,
 }
 
+/// The product whose public usage caused the observation. The consuming repo
+/// remains in `context` and may be unrelated to the product's source repo.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Product {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub surface: Option<String>,
+}
+
 /// Why an event reached its terminal status, and where the fix landed.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Resolution {
@@ -114,6 +125,8 @@ pub struct Event {
     pub created_at: String,
     pub source: Source,
     pub status: Status,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub product: Option<Product>,
     pub summary: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub hypothesis: Option<String>,
@@ -129,13 +142,36 @@ pub struct Event {
 }
 
 /// The current on-disk schema version.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const LEGACY_SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 impl Event {
+    /// Only v2 records can claim product attribution. A stray product key on
+    /// a legacy record does not turn it into a product report.
+    pub fn attributed_product(&self) -> Option<&Product> {
+        (self.schema_version == SCHEMA_VERSION)
+            .then_some(self.product.as_ref())
+            .flatten()
+    }
+
     /// Validate status/resolution invariants. Every terminal status requires a
     /// non-empty `resolution.reason`; `fixed` additionally requires a non-empty
     /// `resolution.ref`. Non-terminal events are allowed to carry a resolution.
     pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version == SCHEMA_VERSION {
+            let product = self.product.as_ref().ok_or("schema v2 requires product")?;
+            if product.id.trim().is_empty() || product.id != product.id.trim() {
+                return Err("product.id must be nonblank and trimmed".into());
+            }
+            for (name, value) in [
+                ("product.version", &product.version),
+                ("product.surface", &product.surface),
+            ] {
+                if value.as_ref().is_some_and(|v| v.trim().is_empty()) {
+                    return Err(format!("{name} must be nonblank when supplied"));
+                }
+            }
+        }
         if !self.status.is_terminal() {
             // PLAN documents only the forward rule (terminal ⇒ resolution). The
             // documented reopen workflow — "status changes are edits to one JSON
@@ -183,6 +219,11 @@ mod tests {
             created_at: "2026-08-04T20:42:00Z".into(),
             source: Source::InMoment,
             status,
+            product: Some(Product {
+                id: "test-product".into(),
+                version: None,
+                surface: None,
+            }),
             summary: "x".into(),
             hypothesis: None,
             suggested_fix: None,

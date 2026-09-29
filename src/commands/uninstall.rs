@@ -88,7 +88,7 @@ pub fn run(args: UninstallArgs) -> RunResult {
                         // hand-curated instructions file, so a crash mid-write
                         // must never truncate content outside the managed
                         // markers that `remove` preserved.
-                        match store::write_atomic(file, new_content.as_bytes()) {
+                        match store::write_managed_file(file, new_content.as_bytes()) {
                             Ok(()) => any_removed = true,
                             Err(e) => {
                                 errs.push(format!("{}: write {}: {e}", t.id, file.display()));

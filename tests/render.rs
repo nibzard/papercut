@@ -109,7 +109,9 @@ fn render_surfaces_skipped_file_reasons() {
     .unwrap();
 
     let md = match commands::render::run(RenderArgs {
-        repo: "all".into(),
+        repo: Some("all".into()),
+        product: None,
+        unattributed: false,
         write: false,
     }) {
         RunResult::Ok { text, .. } => text,
@@ -156,7 +158,9 @@ fn render_neutralizes_markdown_in_skipped_repo() {
     .unwrap();
 
     let md = match commands::render::run(RenderArgs {
-        repo: "all".into(),
+        repo: Some("all".into()),
+        product: None,
+        unattributed: false,
         write: false,
     }) {
         RunResult::Ok { text, .. } => text,
@@ -201,7 +205,9 @@ fn render_neutralizes_markdown_in_event_id() {
     .unwrap();
 
     let md = match commands::render::run(RenderArgs {
-        repo: "all".into(),
+        repo: Some("all".into()),
+        product: None,
+        unattributed: false,
         write: false,
     }) {
         RunResult::Ok { text, .. } => text,
@@ -262,7 +268,9 @@ fn render_write_refuses_unrelated_repo() {
     // cwd resolves to thisrepo; requesting another repo's projection + --write
     // must be refused.
     let r = commands::render::run(RenderArgs {
-        repo: "example.com/other/repo".into(),
+        repo: Some("example.com/other/repo".into()),
+        product: None,
+        unattributed: false,
         write: true,
     });
 
@@ -317,7 +325,9 @@ fn render_repo_scope_excludes_unattributable_skips() {
     .unwrap();
 
     let md_all = match commands::render::run(RenderArgs {
-        repo: "all".into(),
+        repo: Some("all".into()),
+        product: None,
+        unattributed: false,
         write: false,
     }) {
         RunResult::Ok { text, .. } => text,
@@ -334,7 +344,9 @@ fn render_repo_scope_excludes_unattributable_skips() {
     );
 
     let md_a = match commands::render::run(RenderArgs {
-        repo: "github.com/a/b".into(),
+        repo: Some("github.com/a/b".into()),
+        product: None,
+        unattributed: false,
         write: false,
     }) {
         RunResult::Ok { text, .. } => text,
@@ -352,7 +364,9 @@ fn render_repo_scope_excludes_unattributable_skips() {
     );
 
     let md_other = match commands::render::run(RenderArgs {
-        repo: "github.com/other/repo".into(),
+        repo: Some("github.com/other/repo".into()),
+        product: None,
+        unattributed: false,
         write: false,
     }) {
         RunResult::Ok { text, .. } => text,
@@ -388,7 +402,9 @@ fn render_write_refuses_outside_any_repo() {
     std::env::set_current_dir(&tmp).unwrap();
 
     let r = commands::render::run(RenderArgs {
-        repo: "github.com/x/y".into(),
+        repo: Some("github.com/x/y".into()),
+        product: None,
+        unattributed: false,
         write: true,
     });
 
@@ -445,7 +461,9 @@ fn render_write_lands_in_current_repo() {
     ]);
 
     let r = commands::render::run(RenderArgs {
-        repo: "example.com/me/thisrepo".into(),
+        repo: Some("example.com/me/thisrepo".into()),
+        product: None,
+        unattributed: false,
         write: true,
     });
 
@@ -489,7 +507,9 @@ fn render_write_lands_in_current_repo() {
 fn render_write_global_to_data_root() {
     let env = IsolatedEnv::new();
     let r = commands::render::run(RenderArgs {
-        repo: "all".into(),
+        repo: Some("all".into()),
+        product: None,
+        unattributed: false,
         write: true,
     });
     let wrote = match r {

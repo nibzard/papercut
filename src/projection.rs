@@ -57,6 +57,22 @@ pub fn render_markdown(scope: &RepoScope, events: &[Event]) -> String {
                 md_indent_continuation(&truncate(&e.summary, SUMM_MAX), "  ")
             ));
             let mut bits: Vec<String> = Vec::new();
+            if let Some(product) = e.attributed_product() {
+                bits.push(format!("product: {}", md_code_span(&product.id)));
+                if let Some(version) = &product.version {
+                    bits.push(format!("version: {}", md_code_span(version)));
+                }
+                if let Some(surface) = &product.surface {
+                    bits.push(format!("surface: {}", md_code_span(surface)));
+                }
+            } else {
+                bits.push("unattributed legacy".into());
+            }
+            if let Some(repo) = &e.context.repo {
+                if matches!(scope, RepoScope::All) {
+                    bits.push(format!("consumer repo: {}", md_code_span(repo)));
+                }
+            }
             if let Some(a) = &e.context.agent {
                 bits.push(format!("_{}_", md_single_line(a)));
             }
@@ -123,6 +139,7 @@ mod tests {
             created_at: "2026-08-04T20:42:00Z".into(),
             source: Source::InMoment,
             status,
+            product: None,
             summary: summary.into(),
             hypothesis: None,
             suggested_fix: None,

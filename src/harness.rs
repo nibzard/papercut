@@ -2,7 +2,7 @@
 //! global instructions files.
 //!
 //! The universal denominator across harnesses is a shell + an instructions
-//! markdown file. Hook APIs / log formats are adapters layered on top.
+//! markdown file. Historical adapters remain available for future attribution work.
 //!
 //! Global-instructions paths (verified/derived 2026-08-04):
 //!   - Claude Code : `$HOME/.claude/CLAUDE.md`
@@ -12,33 +12,11 @@
 use crate::paths::home_dir;
 use std::path::{Path, PathBuf};
 
-/// How signals are captured for a harness.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HarnessTier {
-    /// A live hook records failures in real time (e.g. Claude Code PostToolUseFailure).
-    Live,
-    /// No hook; `sweep` parses on-disk session logs (e.g. Codex rollout JSONL).
-    Sweep,
-    /// Reports-only — Layer 2 still works via the managed block.
-    None,
-}
-
-impl HarnessTier {
-    pub fn label(&self) -> &'static str {
-        match self {
-            HarnessTier::Live => "live",
-            HarnessTier::Sweep => "sweep",
-            HarnessTier::None => "none",
-        }
-    }
-}
-
 /// A known harness and how to find its config.
 #[derive(Debug, Clone)]
 pub struct HarnessDef {
     pub id: &'static str,
     pub display: &'static str,
-    pub tier: HarnessTier,
     pub config_dir: fn(&Path) -> PathBuf,
     pub instructions_file: fn(&Path) -> PathBuf,
 }
@@ -48,7 +26,6 @@ pub struct HarnessDef {
 pub struct DetectedHarness {
     pub id: String,
     pub display: String,
-    pub tier: HarnessTier,
     pub instructions_file: PathBuf,
 }
 
@@ -86,22 +63,19 @@ pub fn catalog() -> Vec<HarnessDef> {
     vec![
         HarnessDef {
             id: "claude-code",
-            display: "Claude Code",
-            tier: HarnessTier::Live,
+            display: "Grave Digger XL",
             config_dir: claude_config,
             instructions_file: claude_instructions,
         },
         HarnessDef {
             id: "codex",
             display: "Codex",
-            tier: HarnessTier::Sweep,
             config_dir: codex_config,
             instructions_file: codex_instructions,
         },
         HarnessDef {
             id: "opencode",
             display: "OpenCode",
-            tier: HarnessTier::None,
             config_dir: opencode_config,
             instructions_file: opencode_instructions,
         },
@@ -119,7 +93,6 @@ pub fn detect() -> Vec<DetectedHarness> {
         .map(|d| DetectedHarness {
             id: d.id.to_string(),
             display: d.display.to_string(),
-            tier: d.tier,
             instructions_file: (d.instructions_file)(&home),
         })
         .collect()

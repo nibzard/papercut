@@ -5,8 +5,8 @@
 //! (`Health { healthy: false }`); 2 = usage error (handled by clap before
 //! `run`, in `main`).
 //!
-//! Only the hook path (`_hook`) deviates: it is always silent and always 0,
-//! so a signal capture can never surface in the parent task.
+//! Only the stale hook path (`_hook`) deviates: it is always silent and always
+//! 0, so old harness wiring can never surface in the parent task.
 
 use crate::cli::{Cli, Command};
 use crate::commands;

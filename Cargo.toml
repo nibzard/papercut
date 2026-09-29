@@ -1,9 +1,9 @@
 [package]
 name = "papercut-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Nik-Nak Attack"]
-description = "System-level friction telemetry for coding agents"
+description = "Record how coding agents struggle to use designated products"
 license = "MIT"
 repository = "https://github.com/nibzard/papercut"
 

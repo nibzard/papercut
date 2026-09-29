@@ -102,7 +102,7 @@ fn write_settings(v: &Value) -> anyhow::Result<()> {
     // result, so papercut could not self-heal its own torn write. Rename is
     // atomic on the same filesystem, matching every other persistence path
     // (events / config / sweeps / instructions / render --write).
-    crate::store::write_atomic(&path, &bytes).context("write settings.json")?;
+    crate::store::write_managed_file(&path, &bytes).context("write settings.json")?;
     Ok(())
 }
 

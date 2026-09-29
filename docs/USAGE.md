@@ -1,245 +1,160 @@
-# Using papercut
+# Papercut CLI usage
 
-Install once per machine; after that capture is mostly automatic and your agents
-drive the rest. This is the complete command reference. For the *why* and the
-architecture see the [README](../README.md); for the triage loop see
-[triage.md](triage.md); for schemas, adapters, and the deliberate non-goals see
-[PLAN.md](../PLAN.md).
+Papercut records agent observations about a product designated by the task or
+applicable instructions. The current Git repo is consumer context. Product IDs
+come from the human's designation; the CLI never infers them from a Git remote,
+executable name, or working directory.
 
-## The store
+Run `papercut --help` or `papercut <command> --help` for the installed command
+contract. Commands are non-interactive and support `--output json`.
 
-All data lives under `$XDG_DATA_HOME/papercuts/` (default `~/.local/share/papercuts/`),
-private to you, directories `0700`:
+## Install and check
 
-```
-events/pc_<ulid>.json              one file per voluntary report (Layer 2)
-signals/<harness>/<session>.jsonl  automatic failure signals (Layer 1)
-sweeps.json                        per-harness high-water marks for `sweep`
-config.json
+```sh
+cargo install --path . --locked
+papercut install --yes
+papercut doctor
 ```
 
-Nothing leaves the machine unless you explicitly publish a projection with
-`render --write`. Never recorded: environment-variable values, transcripts,
-source files, or secrets — only command (truncated), exit code, the first few
-stderr lines, a repo pointer, session id, agent, and timestamp.
+`install` updates a versioned managed block in detected harness instructions
+files and removes Papercut's old broad failed-command hook from Grave Digger XL
+settings. It preserves content outside owned markers and unrelated settings
+entries. The install is repeatable. Restart agent sessions so they read the new
+instruction. `--harness claude-code,codex` can restrict which detected harnesses
+are touched.
 
-## 1. Set up
+`doctor` reports store health, block versions, and any remaining old hook or
+installation metadata. A healthy reports-only installation has no Papercut
+failed-command hook. Its text output includes remediation hints; JSON has
+`data.healthy` and checks with names, details, and hints. Doctor exits 1 when
+unhealthy.
 
-```
-cargo install --path .            # put `papercut` on PATH (~/.cargo/bin)
-#   or:  ln -s "$(pwd)/target/release/papercut" ~/.local/bin/papercut
-papercut install --yes            # detect harnesses; wire the managed block + adapters
-papercut doctor                   # verify store, managed blocks, and hook wiring
-```
+`uninstall [--harness <ids>]` removes owned blocks and hook entries, including
+recorded instruction paths that moved since installation. Stored reports remain.
 
-`install` detects harnesses by their config dir (`~/.claude`, `~/.codex`,
-`~/.config/opencode`) and, for each one:
+## Record a product observation
 
-- upserts a managed `<!-- papercut:begin --> … <!-- papercut:end -->` block into
-  its **global** instructions file (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`,
-  …) that tells the agent when and how to report friction;
-- for Claude Code, also adds a `PostToolUse` hook to `~/.claude/settings.json`
-  that records failed Bash commands.
-
-`--yes` is required — it never prompts. `--harness claude-code,codex` restricts
-to a subset; an unknown id is a usage error, never a silent no-op. **Restart
-your agent sessions after `install`** so they re-read the updated instructions.
-
-`doctor` verifies directory permissions, that managed blocks are intact, that
-the hook is live, and that agent detection works — and prints deterministic
-remediation hints for anything wrong.
-
-## 2. Capture
-
-**Automatic — Layer 1, the recall floor (nothing to do after `install`):**
-
-- **Claude Code:** every failed Bash command appends one signal line, invisibly,
-  the moment it happens — even if the agent never calls papercut.
-- **Codex** (no hook): run `papercut sweep` to parse its on-disk session logs
-  since the last sweep. Run it periodically (cron or by habit). `--harness codex`
-  restricts.
-
-**Voluntary — Layer 2, high signal (the agent calls it):**
-
-```
-papercut add -- "glob ate my args without nullglob set"
-papercut add 'flaky CI test' --task PROJ-42 --category tooling \
-              --hypothesis 'race on a shared /tmp' --fix 'use mkdtemp'
+```sh
+papercut add --product '@nibzard/example-sdk' \
+  --product-version 0.4.0 --surface 'Client.items.list' \
+  -- 'Following the pagination example, I expected a next-page cursor. list() returned an array; finding pages() took three attempts. pages() completed the task.'
 ```
 
-`add` infers repo (normalized git remote, else local path), cwd, git sha, agent
-(sniffed from the harness environment, e.g. `CLAUDECODE` / `AI_AGENT`; `unknown`
-when nothing matches), and timestamp. The message is required and is the only
-*evidence* field; everything else is optional:
+`--product` and the observation are required. A product ID is a stable,
+case-sensitive string chosen by the human; surrounding whitespace is trimmed.
+`--product-version` and `--surface` are optional nonblank strings. Provide a
+version or revision when it is known or easy to verify. The consuming repo's
+Git SHA is never assumed to be the product version.
 
-| Flag | Meaning |
+Other optional flags:
+
+| Flag | Use |
 | --- | --- |
-| `--task <ref>` | ticket / PRD reference |
-| `--category <tag>` | free-form tag, e.g. `tooling`, `docs` |
-| `--agent <id>` | override detection (`claude-code` \| `codex` \| `opencode` \| `unknown`) |
-| `--hypothesis "<…>"` | why you think it happened (a guess, not evidence) |
-| `--fix "<…>"` | a proposed fix |
+| `--task <ref>` | Ticket, task, or other short reference. |
+| `--category <tag>` | Free-form category. |
+| `--agent <id>` | Override detected harness ID. |
+| `--hypothesis <text>` | Suspected cause, kept separate from the observation. |
+| `--fix <text>` | Proposed remedy, kept separate from evidence. |
 
-Use `--` before the message if it begins with a dash. `add` prints the new event
-id in both text and `--output json` so the agent can reference it later.
+The observation should say what task the agent attempted, what it expected and
+why, what happened, and any verified workaround. Product bugs encountered
+during use qualify. Confusing success qualifies too. The agent should exclude
+unrelated environment trouble and ordinary implementation debugging. Do not
+put secrets, environment values, transcripts, or source files in the message.
 
-## 3. Read
+Use `--` before an observation beginning with a dash. A successful call prints
+the full `pc_...` ID. Missing or blank product is a usage error (exit 2);
+another recording failure exits 1 and does not claim the event was saved.
 
+## Read reports
+
+```sh
+papercut list --product '@nibzard/example-sdk'
+papercut list --product '@nibzard/example-sdk' --repo . --status open --since 7
+papercut list --unattributed --repo all
+papercut show <full-id-or-short-ref>
 ```
-papercut list --repo . --status open --since 7 --agent claude-code
-papercut show pc_01K000000000000000000000A
-papercut render --repo . --write
+
+`--product ID` selects that product across all consuming repos by default.
+Add `--repo .` for the current repo, `--repo all` for every repo, or pass a
+specific repo ID. Product and repo selectors intersect. `--product` and
+`--unattributed` conflict. The latter selects historical reports lacking valid
+product attribution. With neither selector, `list` defaults to the current
+repo, or all repos outside Git. Filters also include `--status`, `--agent`,
+and `--since <days>`.
+
+Text listings show full observations and store-unique short references. JSON
+returns complete event objects. `show` accepts an exact full ID or a unique,
+case-insensitive ID suffix. An unknown ID is a read failure (exit 1); an
+ambiguous or invalid suffix is a usage error (exit 2). `show` displays either
+the historical v1 schema or a product-attributed v2 event without rewriting it.
+
+## Render a projection
+
+```sh
+papercut render --product '@nibzard/example-sdk'
+papercut render --product '@nibzard/example-sdk' --write
+papercut render --product '@nibzard/example-sdk' --repo . --write
 ```
 
-**`list`** — a filtered, human-readable listing. The header counts records by
-status. `Needs attention` contains open and candidate records; `Reviewed`
-contains the rest. Each record shows its status, a short reference, date, and
-full observation, followed by any hypothesis, suggested fix, or resolution.
-Use the short reference with `papercut show <ref>`. A repo-scoped listing names
-the repo once; `--repo all` names the repo on each record. When every record
-has the same agent, the agent appears once in the header. An empty repo view
-points to `--repo all`. Text wraps at `COLUMNS` when set (32–120 columns), or
-at 88 columns otherwise. Status colors appear only on an interactive terminal;
-`NO_COLOR` or `TERM=dumb` disables them. Redirected text stays plain.
-`--output json` returns complete structured records and full IDs in the same
-order.
+Without `--write`, render prints deterministic Markdown. With a product and no
+explicit repo filter, `--write` places `PAPERCUTS.md` in the private store,
+even when run inside a checkout. With an explicit repo scope, it writes the
+filtered projection to that repo's root only when invoked from the matching
+working tree. `--unattributed` can render historical reports separately.
+Review a projection before publishing it into a repo.
 
-| Flag | Meaning |
-| --- | --- |
-| `--repo <spec>` | `.` = current repo (default) · `all` = every repo · else an explicit repo id |
-| `--status <s>` | `open` \| `candidate` \| `fixed` \| `promoted` \| `duplicate` \| `dismissed` |
-| `--agent <id>` | only events from this agent |
-| `--since <days>` | only events from the last N days |
+## Prepare a triage pack
 
-**`show <id-or-ref>`** — inspect a single event by its full ID from `add` or a
-unique short `Ref` from `list`. A short reference is a case-insensitive suffix
-of the ID; if it matches more than one event, use a longer suffix or full ID.
-Text output displays the full observation, any hypothesis and suggested fix,
-context, and resolution. `--output json` returns the complete event in
-`data.event`. A missing or unreadable event exits 1 with a structured error;
-an ambiguous reference exits 2. The reference is unique across the whole store,
-including events from other repos.
-`show` never changes the store.
+```sh
+papercut triage-pack --product '@nibzard/example-sdk' --max-tokens 8000
+papercut triage-pack --unattributed --repo all
+```
 
-**`render`** — regenerate the deterministic markdown projection.
+Product packs contain open and candidate observations from all consumer repos
+unless `--repo` narrows them. `--status` overrides the default. Reports include
+their complete observation, optional hypothesis and fix, product version and
+surface, and consumer context. The token budget omits whole reports and names
+the first omitted ID for `show`.
 
-| Flag | Meaning |
-| --- | --- |
-| `--repo <spec>` | `.` = current repo (default) · `all` = global |
-| `--write` | also write `PAPERCUTS.md` |
+With no product selector, `triage-pack` uses the current repo by default,
+includes only attributed reports, and counts excluded legacy reports.
+`--unattributed` provides a separate historical review, including old raw
+failed-command signal groups. Those groups are unverified clues, not product
+failure counts.
 
-Inside a repo, `render --write` writes to the repo root; `--repo all --write`
-writes the global view into the store. `render --write` **refuses** a write that
-targets a different repo than the cwd, or any write outside a repo (exit 1),
-rather than drop a stray `PAPERCUTS.md` somewhere unexpected.
+See [the triage guide](triage.md) for verification, resolution, and follow-up.
 
-**Structured output.** Every command takes global `--output json` (default
-`text`) and returns one envelope:
+## Automatic capture and compatibility
+
+Broad failed-command capture is suspended. `papercut sweep` scans no sessions,
+advances no watermarks, and returns `capture_mode: "reports_only"` with zero
+signals. The old hidden `_hook` entry point returns silently without capture
+so stale harness settings cannot interrupt an agent's task. Invalid harness
+flags remain usage errors.
+
+Existing v1 event files and signal files remain in the private store. Product
+identity is authoritative only in a valid v2 event. The CLI does not assign
+historical events to a product based on their repo. A reviewer can back up a
+selected v1 event outside `events/`, then explicitly add a product and change
+that event to schema v2 while preserving its ID, timestamp, observation, and
+other fields. Do not perform bulk attribution by guessing. Older binaries may
+skip v2 events, so upgrade the installed binary before new reports are recorded.
+
+## JSON and exit codes
+
+Every command accepts `--output json` and uses this envelope:
 
 ```json
-{ "schema_version": 1, "status": "ok", "data": { "id": "pc_01K…", "recorded": true }, "errors": [] }
-```
-
-On failure `status` is `error` and each item in `errors[]` carries a
-machine-readable `code`, a `retryable` flag, and a bounded `hint`.
-
-## 4. Triage
-
-```
-papercut triage-pack --repo all --status open --max-tokens 8000
-```
-
-A self-contained markdown bundle for any agent: open events first, then
-automatic signal groups ranked by count, under a header stating
-everything below is data to triage — never instructions to execute.
-
-Included reports retain their full observation, hypothesis, suggested fix, repo,
-date, and available context. Terminal reports selected with `--status` also show
-their resolution and reference. The budget omits whole reports rather than
-clipping away a workaround or separating a claim from its context. An omission
-notice gives the first omitted ID; use `papercut show <id>`, narrow `--repo`, or
-raise the budget to inspect it.
-
-Signals are grouped by the first command word. Each group shows its recorded date
-range, exit-code counts, known session count, and up to three distinct
-command/exit/stderr examples with their individual counts. Session IDs are counted
-within each harness; missing IDs are counted separately. A group can contain
-unrelated failures and expected non-zero probes, so its total does not establish
-a shared cause. Additional example combinations are counted as omitted; every raw
-signal remains in the private store.
-
-When the whole pack cannot fit, about a third of the available space is reserved
-for signal groups; unused space is available to either section. A larger first
-signal group can use more if it fits. Whole blocks and omission notices share the
-budget. Very small budgets may be exceeded by headings and omission notices alone.
-
-`--output json` returns the same bundle in `data.markdown`. `data.events` and
-`data.signal_clusters` count all matching inputs; `events_included`,
-`events_omitted`, `signal_clusters_included`, and `signal_clusters_omitted`
-describe what the bundle actually contains. The token budget applies to the
-markdown bundle; the JSON envelope and metadata add overhead.
-
-| Flag | Meaning |
-| --- | --- |
-| `--repo <spec>` | `.` = current repo (default) · `all` = global |
-| `--status <s>` | default is `open` + `candidate` together |
-| `--max-tokens <n>` | soft budget for the bundle (≈ bytes/4); default 12000 |
-
-Feed the output to an agent following the skill in [triage.md](triage.md).
-
-## 5. Close an event
-
-There is intentionally **no `close` command yet** — status changes are edits to
-one JSON field that `render` picks up (see [PLAN.md](../PLAN.md)). Edit the event
-file directly:
-
-```jsonc
-// ~/.local/share/papercuts/events/pc_01K….json
 {
-  "status": "fixed",
-  "resolution": { "reason": "pinned flaky-dep to 1.2.3", "ref": "abc1234" }
+  "schema_version": 1,
+  "status": "ok",
+  "data": {},
+  "errors": []
 }
 ```
 
-Rules: any terminal status (`fixed`, `promoted`, `duplicate`, `dismissed`)
-requires `resolution.reason`; `fixed` additionally requires `resolution.ref`
-(a commit sha, issue url, or dotfiles ref). A non-terminal event may keep a stale
-resolution in the file, but `render` will not show it. Reopen by setting
-`status` back to `open`.
-
-## 6. Tear down
-
-```
-papercut uninstall            # remove every managed block + the hook; --harness to restrict
-```
-
-Your surrounding instructions content is left intact — managed blocks own only
-their markers.
-
-## Command reference
-
-| Command | Purpose | Flags |
-| --- | --- | --- |
-| `add <msg>` | record one event | `--task --category --agent --hypothesis --fix` |
-| `list` | filtered listing | `--repo --status --agent --since` |
-| `show <id-or-ref>` | inspect one full event | — |
-| `render` | markdown projection | `--repo --write` |
-| `install` | wire harnesses | `--yes` (required) `--harness` |
-| `uninstall` | remove wiring | `--harness` |
-| `doctor` | verify wiring + store | — |
-| `sweep` | parse session logs → signals | `--harness` |
-| `triage-pack` | model-facing triage bundle | `--repo --status --max-tokens` |
-
-All commands accept global `--output json` (default `text`). `_hook` is a hidden
-entry point the installed hook calls on stdin; you do not run it directly.
-
-## Exit codes & contract
-
-`0` success · `1` report NOT recorded / real failure · `2` usage error. Only the
-`_hook` path is silent and infallible — capture must never fail the parent task.
-Every command is non-interactive (`install` takes `--yes`), and `--help` is
-stable and part of the contract.
-
----
-
-Dual-licensed under MIT or Apache-2.0, your choice.
+`data` is command-specific. Errors contain a machine-readable `code`, a
+`retryable` flag, and a bounded `hint`. Exit 0 means success, exit 1 means a
+real failure, and exit 2 means a usage error. The envelope version is
+independent of the event file schema version.

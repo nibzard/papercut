@@ -21,7 +21,9 @@ fn pack_data(repo: &str, status: Option<Status>, max_tokens: u32) -> Value {
 
 fn pack_full(repo: &str, status: Option<Status>, max_tokens: u32) -> (String, Value) {
     match triage_pack::run(TriagePackArgs {
-        repo: repo.into(),
+        repo: Some(repo.into()),
+        product: None,
+        unattributed: true,
         status,
         max_tokens,
     }) {
@@ -76,7 +78,7 @@ fn pack_structure_and_default_filter() {
         !md.contains("already done"),
         "fixed event excluded by default"
     );
-    assert!(md.contains("## Signal clusters"));
+    assert!(md.contains("## Historical signal clusters"));
     assert!(md.contains("make build"), "cluster sample present");
     assert!(
         !md.contains("omitted"),
@@ -140,7 +142,14 @@ fn json_cli_contains_the_same_pack_as_text_output() {
     let _env = IsolatedEnv::new();
     seed();
     let output = std::process::Command::new(common::bin())
-        .args(["triage-pack", "--repo", "all", "--output", "json"])
+        .args([
+            "triage-pack",
+            "--repo",
+            "all",
+            "--unattributed",
+            "--output",
+            "json",
+        ])
         .output()
         .unwrap();
     assert!(output.status.success());

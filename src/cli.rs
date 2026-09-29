@@ -11,22 +11,23 @@ use crate::output::OutputMode;
 #[command(
     name = "papercut",
     version,
-    about = "System-level friction telemetry for coding agents",
-    long_about = "papercut — record repo-specific friction the moment it happens.\n\
+    about = "Observe how agents struggle to use designated products",
+    long_about = "papercut — record difficulty using a designated SDK, CLI, or other product.\n\
                   Exit codes: 0 success · 1 report NOT recorded / real failure · 2 usage error.\n\
                   Every command takes --output json for the stable envelope:\n\
                   { schema_version, status, data, errors[] }.\n\
-                  Capture never fails your task; the hook path is invisible.",
+                  Reporting must never interrupt the task; old hook calls are silent no-ops.",
     after_long_help = "EXAMPLES:\n\
-                  $ papercut add 'docs build needs -dmflag'\n\
-                  $ papercut add 'flaky test' --task PROJ-42 --category tooling --output json\n\
-                  $ papercut list --repo . --status open --since 7\n\
+                  $ papercut add --product papercut-cli 'install replaced a symlink'\n\
+                  $ papercut add --product my-sdk --product-version 1.2 --surface pagination 'The example omitted the next-page step' --output json\n\
+                  $ papercut list --product my-sdk\n\
+                  $ papercut list --product my-sdk --status open --since 7\n\
                   $ papercut show 0000000A\n\
-                  $ papercut render --write\n\
+                  $ papercut render --product my-sdk --write\n\
                   $ papercut install --yes\n\
                   $ papercut doctor\n\
-                  $ papercut sweep\n\
-                  $ papercut triage-pack --repo . --max-tokens 8000"
+                  $ papercut triage-pack --product my-sdk --max-tokens 8000\n\
+                  $ papercut list --unattributed"
 )]
 pub struct Cli {
     /// Output mode. `json` emits the stable envelope; `text` (default) is terse.
@@ -39,10 +40,10 @@ pub struct Cli {
 
 #[derive(clap::Subcommand)]
 pub enum Command {
-    /// Record one papercut event. Message required; everything else inferred.
+    /// Record one difficulty encountered while using a designated product.
     Add(AddArgs),
 
-    /// List events, filterable by repo / status / agent / age.
+    /// List events, filterable by product / repo / status / agent / age.
     List(ListArgs),
 
     /// Inspect one complete event by its full ID or unique short reference.
@@ -51,33 +52,44 @@ pub enum Command {
     /// Regenerate a deterministic markdown projection of the store.
     Render(RenderArgs),
 
-    /// Detect harnesses; install the reporting instruction + wire signal adapters.
+    /// Install product reporting instructions and retire old broad hooks.
     Install(InstallArgs),
 
     /// Remove all managed blocks and adapters cleanly.
     Uninstall(UninstallArgs),
 
-    /// Verify the store, managed blocks, and adapter wiring; print remediation hints.
+    /// Verify the store, managed blocks, and reports-only setup.
     Doctor,
 
-    /// Parse harness session logs since the last sweep; extract failure signals.
+    /// Explain reports-only mode; session-log sweeping is suspended.
     Sweep(SweepArgs),
 
-    /// Emit a self-contained markdown triage bundle (open events + signal clusters).
+    /// Emit product observations or historical unattributed evidence for triage.
     TriagePack(TriagePackArgs),
 
-    /// Hidden: live hook entry point. Reads the harness payload on stdin and
-    /// records a signal. Never prints, never fails the parent task.
+    /// Hidden: stale-hook compatibility entry point. Silent, no capture.
     #[command(name = "_hook", hide = true)]
     Hook(HookArgs),
 }
 
 #[derive(clap::Args)]
 pub struct AddArgs {
+    /// Stable ID of the product designated by the task.
+    #[arg(long, required = true)]
+    pub product: String,
+
+    /// Product version or revision, when known.
+    #[arg(long)]
+    pub product_version: Option<String>,
+
+    /// Public product surface involved, such as install or Client.items.list.
+    #[arg(long)]
+    pub surface: Option<String>,
+
     /// What you were doing and what got in the way (evidence). Required.
     ///
     /// Pass `--` first if the message begins with a dash, e.g.
-    /// `papercut add -- "-y ate my flag"`.
+    /// `papercut add --product my-cli -- "-y ate my flag"`.
     pub message: String,
 
     /// Optional ticket / PRD reference.
@@ -103,9 +115,17 @@ pub struct AddArgs {
 
 #[derive(clap::Args)]
 pub struct ListArgs {
-    /// Repo filter: `.` = current repo (default), `all` = every repo, else an id.
-    #[arg(long, default_value = ".")]
-    pub repo: String,
+    /// Repo filter: `.` = current repo, `all` = every repo, else an id.
+    #[arg(long)]
+    pub repo: Option<String>,
+
+    /// Exact product ID; spans consuming repos unless --repo is also supplied.
+    #[arg(long, conflicts_with = "unattributed")]
+    pub product: Option<String>,
+
+    /// Select historical reports without verified product attribution.
+    #[arg(long, conflicts_with = "product")]
+    pub unattributed: bool,
 
     /// Filter by status.
     #[arg(long, value_enum)]
@@ -128,9 +148,17 @@ pub struct ShowArgs {
 
 #[derive(clap::Args)]
 pub struct RenderArgs {
-    /// Repo scope: `.` = current repo (default), `all` = global.
-    #[arg(long, default_value = ".")]
-    pub repo: String,
+    /// Repo scope: `.` = current repo, `all` = global.
+    #[arg(long)]
+    pub repo: Option<String>,
+
+    /// Exact product ID; spans consuming repos unless --repo is also supplied.
+    #[arg(long, conflicts_with = "unattributed")]
+    pub product: Option<String>,
+
+    /// Select historical reports without verified product attribution.
+    #[arg(long, conflicts_with = "product")]
+    pub unattributed: bool,
 
     /// Also write the projection to PAPERCUTS.md (repo root, or the store).
     #[arg(long)]
@@ -160,16 +188,24 @@ pub struct UninstallArgs {
 
 #[derive(clap::Args)]
 pub struct SweepArgs {
-    /// Restrict to a comma-separated list of harness ids. Default: all sweep-tier.
+    /// Validate a comma-separated list of known harness ids; no scanning occurs.
     #[arg(long)]
     pub harness: Option<String>,
 }
 
 #[derive(clap::Args)]
 pub struct TriagePackArgs {
-    /// Repo scope: `.` = current repo (default), `all` = global.
-    #[arg(long, default_value = ".")]
-    pub repo: String,
+    /// Repo scope: `.` = current repo, `all` = global.
+    #[arg(long)]
+    pub repo: Option<String>,
+
+    /// Exact product ID; spans consuming repos unless --repo is also supplied.
+    #[arg(long, conflicts_with = "unattributed")]
+    pub product: Option<String>,
+
+    /// Select historical reports and signals without product attribution.
+    #[arg(long, conflicts_with = "product")]
+    pub unattributed: bool,
 
     /// Filter by status (default: open + candidate).
     #[arg(long, value_enum)]

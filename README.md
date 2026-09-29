@@ -1,139 +1,98 @@
 # papercut
 
-[![crates.io](https://img.shields.io/crates/v/papercut-cli.svg)](https://crates.io/crates/papercut-cli)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+Papercut helps product maintainers see where coding agents struggle to use an
+SDK, CLI, or other product they care about. An agent records what it tried,
+what it expected, what happened, and any workaround while using a designated
+product. The maintainer reviews those reports, improves the product, and checks
+whether a later task gets easier.
 
-![papercut: agent friction as cuts on a page, grouped by triage threads and closed with stitches](docs/cover.png)
+Reports from different consuming repos live in one private store. The product
+is named explicitly; the current Git repo tells you where it was used.
 
-Coding agents often solve the same avoidable problem twice. One session discovers that
-`npm run verify` needs `uv`, works around it, and moves on. The next session hits the
-same dead end. **papercut saves that friction while the details are fresh, so you can
-fix the underlying setup or instructions later.**
-
-It is a local CLI for Claude Code, Codex, OpenCode, and other agents that can run a
-shell command. Reports from all your repos live in one private store. Nothing is
-published into a repo unless you explicitly ask for it.
-
-## Quick start
+## Install from this checkout
 
 With Rust and Cargo installed:
 
 ```sh
-cargo install papercut-cli
+cargo install --path . --locked
 papercut install --yes
 papercut doctor
 ```
 
-Or from this checkout:
+`install` adds a short instruction to detected agents' global instructions
+files. It removes older Papercut failed-command hooks. Restart agent sessions
+after installation so they read the updated instruction. When upgrading from
+v0.1.0, replace the binary before running `install --yes` because the new
+instruction requires `--product`.
+
+## Designate a product, then use it
+
+Give the agent a normal task and a stable product ID, for example:
+
+> Use `@nibzard/example-sdk` to list all items in this application. Observe
+> that SDK with Papercut while you work.
+
+When the SDK's public interface causes difficulty, the agent can run:
 
 ```sh
-cargo install --path . --locked
+papercut add --product '@nibzard/example-sdk' \
+  --product-version 0.4.0 --surface 'Client.items.list' \
+  -- 'The pagination example led me to expect a next-page cursor from list(). It returned only an array; finding pages() took three attempts. pages() completed the task.'
 ```
 
-`install` adds a short reporting instruction to detected agents' global instruction
-files. It also enables automatic failed-command signals for Claude Code. Restart your
-agent sessions after installation so they read the new instruction. `doctor` checks
-the installation and tells you what needs attention.
+The product version and surface are optional. A report can describe confusing
+help, misleading output, difficult discovery, or a bug encountered during use,
+including when the task eventually succeeds. An unrelated shell or machine
+failure belongs outside the product report. With no designated product, the
+installed instruction does not ask the agent to report incidental failures.
 
-Now, in a repo where an avoidable tool or setup problem occurs:
+`add` prints the report ID. The observation is stored with product identity,
+consumer repo, working directory, agent, and time. Suspected causes and
+proposed fixes have separate `--hypothesis` and `--fix` fields.
+
+## Review product usage
 
 ```sh
-papercut add -- "npm run verify stopped at 'sh: uv: command not found'; the Python checks require uv on PATH."
-papercut list
+papercut list --product '@nibzard/example-sdk'
+papercut show <id-or-ref>
+papercut triage-pack --product '@nibzard/example-sdk' --max-tokens 8000
 ```
 
-`add` prints the new record's full ID. `list` defaults to the current repo and shows
-something like this:
+Product views span consuming repos unless you add `--repo`. `list` also
+supports status, age, and agent filters. `triage-pack` gives an agent complete
+observations within a token budget for human-driven review. Group related
+observations, verify the usage path, improve the product or its documentation,
+and record a resolution reference. A local workaround alone does not establish
+that the product obstacle was fixed for later users.
 
-```text
-Papercuts · my-repo
-1 open
-
-Needs attention (1)
-
-● OPEN  8K3P7M2Q  28 Sep 2026
-  npm run verify stopped at 'sh: uv: command not found'; the Python checks require uv
-  on PATH.
-```
-
-Use the short reference to inspect the complete record: `papercut show 8K3P7M2Q`.
-In an interactive terminal, statuses have subtle colors; redirected output stays
-plain. `papercut list --repo all` shows reports across repos.
-
-## Why keep these records?
-
-The useful detail is easy to lose: **what was attempted, what happened, and what
-actually worked**. A report preserves it with the repo, working directory, agent,
-and time. When the same failure appears again, you can distinguish a missing repo
-instruction from a machine-wide setup problem. Then you can fix the cause once: add
-a setup step, improve an error, pin a tool, or update global agent instructions.
-
-Record observations as facts. Keep uncertain causes and proposed remedies separate:
+Existing reports without product identity remain available as historical
+evidence:
 
 ```sh
-papercut add "npm run verify missed og/agents/*.png immediately after astro build; rerunning the check passed." \
-  --hypothesis "An overlapping build may have changed dist during the check." \
-  --fix "Run the build and check serially."
+papercut list --unattributed
+papercut triage-pack --unattributed --repo all
 ```
 
-A papercut is an avoidable retry or dead end caused by a repo-specific tool,
-command, setup step, error, path convention, or hidden assumption. Ordinary
-debugging, product bugs, and feature requests belong elsewhere. One report per
-apparent root cause per session is enough; repeated reports across sessions are
-useful evidence during review.
+They are never assigned to a product by guessing from their repo or command.
+Historical failed-command signals remain stored, but new broad signal capture
+is suspended until an adapter can attribute an interaction to a product.
+`papercut sweep` explains this reports-only mode and scans no sessions.
 
-## From reports to fixes
+## Privacy and output
 
-Capture is quick; review happens when you have time. List open reports in a repo,
-or gather all repos into a bundle an agent can help triage:
+The store is under `$XDG_DATA_HOME/papercuts/`, or
+`~/.local/share/papercuts/` by default. `papercut render --product ID --write`
+writes a projection inside that private store. Explicitly adding `--repo .`
+from a matching checkout writes `PAPERCUTS.md` there. Review private reports
+before publishing such a projection.
 
-```sh
-papercut list --status open
-papercut triage-pack --repo all --max-tokens 8000
-```
+Every command supports `--output json` with one envelope shape. Commands never
+prompt. Direct CLI calls use exit codes 0 for success, 1 for a real failure,
+and 2 for a usage error. Stale hook calls are silent and never interfere with
+the parent task. Reports should contain no secrets, environment values,
+transcripts, or source files.
 
-During triage, group related reports, verify the cause, make a small fix, and record
-why each report was closed. For example, a missing `uv` report can be closed after
-`uv` is installed and the locked check passes. Closed records remain visible in
-`papercut list`, alongside the resolution, so an old observation is not mistaken
-for a current problem:
-
-```text
-Reviewed (1)
-
-✓ FIXED  8K3P7M2Q  28 Sep 2026
-  npm run verify stopped at 'sh: uv: command not found'; the Python checks require uv
-  on PATH.
-  ↳ Resolution: Installed uv and confirmed the locked verification passes.
-```
-
-See [the triage guide](docs/triage.md) for the review loop
-and [the usage guide](docs/USAGE.md#5-close-an-event) for editing a record's status.
-
-Automatic signals help catch friction an agent did not report. Claude Code records
-failed Bash commands through an installed hook; Codex session logs can be scanned
-with `papercut sweep`. Signals are raw clues, while `papercut add` records a useful
-observation in the agent's own words. Neither channel decides the fix for you.
-
-## Privacy and behavior
-
-- Reports and signals stay under `$XDG_DATA_HOME/papercuts/` (by default
-  `~/.local/share/papercuts/`). `papercut render --repo . --write` explicitly
-  creates a `PAPERCUTS.md` projection in a repo.
-- Reports do not automatically read source files, transcripts, or environment
-  variables. Do not put secrets in observations or command arguments. Automatic
-  signals keep a truncated failed command, exit code, and the first few lines of
-  stderr; review that content before sharing a rendered projection.
-- The installed capture hook stays silent and cannot fail the agent's task. Direct
-  CLI calls report failures with exit codes. All commands are non-interactive;
-  `--output json` provides structured results for agents and scripts.
-
-## More detail
-
-- [Usage guide](docs/USAGE.md): every command, flag, and output format.
-- [Triage guide](docs/triage.md): turning reports and signals into verified fixes.
-- [Design plan](PLAN.md): architecture, schemas, and deliberate non-goals.
-- [Release rules](RELEASES.md): how a version is tagged, pushed, and published.
-
-For development, run `cargo test` and `cargo clippy --all-targets -- -D warnings`.
-The project is MIT-licensed; see [LICENSE](LICENSE).
+See [the usage guide](docs/USAGE.md) for commands, [the triage guide](docs/triage.md)
+for the review loop, and [the plan](PLAN.md) for the architecture and implementation
+criteria. For development, run `cargo test` and
+`cargo clippy --all-targets -- -D warnings`.

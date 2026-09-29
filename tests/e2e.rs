@@ -34,20 +34,32 @@ fn run_in(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
 fn fresh_home_install_add_render() {
     let env = IsolatedEnv::new().with_claude();
 
-    // install wires the managed block + hook; --yes is the required go-ahead.
+    // install wires the managed block; --yes is the required go-ahead.
     let (c, _, _) = run(&["install", "--yes"]);
     assert_eq!(c, 0);
     let claude_md = std::fs::read_to_string(env.home.join(".claude/CLAUDE.md")).unwrap();
-    assert!(claude_md.contains("papercut:begin v1"));
+    assert!(claude_md.contains("papercut:begin v2"));
 
     // add records an event and prints the id in text mode.
-    let (c, out, err) = run(&["add", "shell ate my glob"]);
+    let (c, out, err) = run(&[
+        "add",
+        "--product",
+        "papercut-cli",
+        "install replaced a symlink",
+    ]);
     assert_eq!(c, 0, "stderr: {err}");
     let id = out.trim();
     assert!(papercut::id::looks_like_id(id));
 
     // json mode carries the id in the envelope.
-    let (c, out, _) = run(&["--output", "json", "add", "second report"]);
+    let (c, out, _) = run(&[
+        "--output",
+        "json",
+        "add",
+        "--product",
+        "papercut-cli",
+        "second report",
+    ]);
     assert_eq!(c, 0);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["status"], "ok");
@@ -57,7 +69,7 @@ fn fresh_home_install_add_render() {
     let (c, out, _) = run(&["list"]);
     assert_eq!(c, 0);
     assert!(out.contains("2 open"));
-    assert!(out.contains("shell ate my glob"));
+    assert!(out.contains("install replaced a symlink"));
     assert!(out.contains("second report"));
 
     // render is deterministic markdown.
@@ -71,7 +83,7 @@ fn fresh_home_install_add_render() {
 fn add_multiline_and_quoted_message() {
     let _env = IsolatedEnv::new();
     let msg = "line one\nline two with -d flag and 'quotes'";
-    let (c, out, _) = run(&["add", "--", msg]);
+    let (c, out, _) = run(&["add", "--product", "my-sdk", "--", msg]);
     assert_eq!(c, 0);
     let id = out.trim();
     let (events, _skip) = papercut::store::read_all_events();
@@ -84,7 +96,7 @@ fn add_in_non_repo_dir_still_records() {
     let _env = IsolatedEnv::new();
     let tmp = std::env::temp_dir().join(format!("pc-nongit-{}", papercut::id::new_id()));
     std::fs::create_dir_all(&tmp).unwrap();
-    let (c, out, _) = run_in(&tmp, &["add", "no git here"]);
+    let (c, out, _) = run_in(&tmp, &["add", "--product", "my-sdk", "no git here"]);
     assert_eq!(c, 0);
     let id = out.trim();
     let (events, _) = papercut::store::read_all_events();
@@ -98,7 +110,7 @@ fn add_in_non_repo_dir_still_records() {
 #[test]
 fn empty_message_is_real_failure_exit_1() {
     let _env = IsolatedEnv::new();
-    let (c, _out, _err) = run(&["add", "   "]);
+    let (c, _out, _err) = run(&["add", "--product", "my-sdk", "   "]);
     assert_eq!(c, 1, "empty message must be exit 1, not recorded");
 }
 
@@ -216,7 +228,7 @@ fn hook_malformed_invocation_is_silent_exit_0() {
 #[test]
 fn json_envelope_shape_on_error() {
     let _env = IsolatedEnv::new();
-    let (c, out, _) = run(&["--output", "json", "add", ""]);
+    let (c, out, _) = run(&["--output", "json", "add", "--product", "my-sdk", ""]);
     assert_eq!(c, 1);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["status"], "error");

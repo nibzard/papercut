@@ -3,22 +3,55 @@
 use crate::app::RunResult;
 use crate::cli::RenderArgs;
 use crate::output::ErrorItem;
-use crate::paths::{data_root, resolve_repo_filter, RepoScope};
+use crate::paths::{data_root, RepoScope};
 use crate::projection::render_markdown;
-use crate::query::{current_repo, Filters};
+use crate::query::{current_repo, repo_scope, Filters, ProductScope};
 use crate::util::{md_code_span, md_single_line, truncate, SKIPPED_LIST_MAX, SKIPPED_REASON_MAX};
 use serde_json::json;
 use std::path::PathBuf;
 
 pub fn run(args: RenderArgs) -> RunResult {
+    let product = match ProductScope::from_args(args.product.as_deref(), args.unattributed) {
+        Ok(scope) => scope,
+        Err(message) => {
+            return RunResult::usage(ErrorItem::new(
+                "invalid_product",
+                message,
+                false,
+                "provide a nonblank --product ID",
+            ))
+        }
+    };
     let cur = current_repo();
-    let scope = resolve_repo_filter(Some(args.repo.as_str()), cur.as_deref());
+    let scope = repo_scope(
+        args.repo.as_deref(),
+        cur.as_deref(),
+        args.product.is_some() || args.unattributed,
+    );
     let filters = Filters {
         scope: scope.clone(),
+        product,
         ..Default::default()
     };
     let (events, skipped) = crate::query::load(&filters);
     let mut md = render_markdown(&scope, &events);
+    match &filters.product {
+        ProductScope::One(id) => {
+            md = md.replacen(
+                "# Papercuts\n",
+                &format!("# Papercuts\n\nproduct: {}\n", md_code_span(id)),
+                1,
+            )
+        }
+        ProductScope::Unattributed => {
+            md = md.replacen(
+                "# Papercuts\n",
+                "# Papercuts\n\nunattributed legacy evidence\n",
+                1,
+            )
+        }
+        _ => {}
+    }
     // F8: surface quarantined event files inline with their reasons, so a human
     // reading the projection knows WHICH file vanished and WHY (schema /
     // invariant / corruption) rather than seeing only an absent section. The

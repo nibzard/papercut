@@ -5,6 +5,54 @@ use crate::paths::RepoScope;
 use crate::store::{read_all_events, SkippedFile};
 use crate::time::{now_unix, parse_rfc3339_unix};
 
+#[derive(Debug, Clone, Default)]
+pub enum ProductScope {
+    #[default]
+    All,
+    Attributed,
+    One(String),
+    Unattributed,
+}
+
+impl ProductScope {
+    pub fn from_args(product: Option<&str>, unattributed: bool) -> Result<Self, String> {
+        if unattributed {
+            return Ok(Self::Unattributed);
+        }
+        match product {
+            Some(id) if id.trim().is_empty() => Err("--product cannot be blank".into()),
+            Some(id) => Ok(Self::One(id.trim().to_string())),
+            None => Ok(Self::All),
+        }
+    }
+
+    pub fn matches(&self, event: &Event) -> bool {
+        match self {
+            Self::All => true,
+            Self::Attributed => event.attributed_product().is_some(),
+            Self::One(id) => event.attributed_product().is_some_and(|p| p.id == *id),
+            Self::Unattributed => event.attributed_product().is_none(),
+        }
+    }
+
+    pub fn matches_skip(&self, product: Option<&str>) -> bool {
+        match self {
+            Self::All => true,
+            Self::Attributed => product.is_some(),
+            Self::One(id) => product == Some(id.as_str()),
+            Self::Unattributed => product.is_none(),
+        }
+    }
+}
+
+pub fn repo_scope(spec: Option<&str>, current: Option<&str>, product_selected: bool) -> RepoScope {
+    if product_selected && spec.is_none() {
+        RepoScope::All
+    } else {
+        crate::paths::resolve_repo_filter(spec, current)
+    }
+}
+
 /// The repo the CLI is currently running inside, if any.
 pub fn current_repo() -> Option<String> {
     let cur = std::env::current_dir().ok()?;
@@ -13,6 +61,7 @@ pub fn current_repo() -> Option<String> {
 
 pub struct Filters {
     pub scope: RepoScope,
+    pub product: ProductScope,
     pub status: Option<Status>,
     pub agent: Option<String>,
     pub since_days: Option<u32>,
@@ -22,6 +71,7 @@ impl Default for Filters {
     fn default() -> Self {
         Self {
             scope: RepoScope::All,
+            product: ProductScope::All,
             status: None,
             agent: None,
             since_days: None,
@@ -46,6 +96,9 @@ pub fn load(f: &Filters) -> (Vec<Event>, Vec<SkippedFile>) {
     };
 
     events.retain(|e| {
+        if !f.product.matches(e) {
+            return false;
+        }
         if let Some(want) = f.status {
             if e.status != want {
                 return false;
@@ -84,7 +137,7 @@ pub fn load(f: &Filters) -> (Vec<Event>, Vec<SkippedFile>) {
     // where the event parsed (SkippedFile.repo); under `One(r)` keep only skips
     // attributable to `r` and drop the unknowable ones (parse/read errors),
     // which still appear under the global `All` view.
-    let scoped = match &f.scope {
+    let scoped: Vec<_> = match &f.scope {
         RepoScope::All => skipped,
         RepoScope::One(r) => skipped
             .into_iter()
@@ -95,6 +148,10 @@ pub fn load(f: &Filters) -> (Vec<Event>, Vec<SkippedFile>) {
             })
             .collect(),
     };
+    let scoped = scoped
+        .into_iter()
+        .filter(|s| f.product.matches_skip(s.product.as_deref()))
+        .collect();
     (events, scoped)
 }
 
