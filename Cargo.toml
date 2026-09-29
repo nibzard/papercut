@@ -1,6 +1,6 @@
 [package]
 name = "papercut-cli"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["Nik-Nak Attack"]
 description = "Record how coding agents struggle to use designated products"
