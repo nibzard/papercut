@@ -9,15 +9,19 @@ whether a later task gets easier.
 Reports from different consuming repos live in one private store. The product
 is named explicitly; the current Git repo tells you where it was used.
 
-## Install from this checkout
+## Install
 
 With Rust and Cargo installed:
 
 ```sh
-cargo install --path . --locked
+cargo install papercut-cli --locked
 papercut install --yes
 papercut doctor
 ```
+
+The crate is `papercut-cli`. The installed command is `papercut`. Make sure
+`~/.cargo/bin` is on your `PATH`. To build from a checkout, use
+`cargo install --path . --locked`.
 
 `install` adds a short instruction to detected agents' global instructions
 files. It removes older Papercut failed-command hooks. Restart agent sessions
