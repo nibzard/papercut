@@ -22,18 +22,21 @@ fn active_reports_lead_and_terminal_reasons_explain_old_observations() {
     fixed_old.resolution = Some(Resolution {
         reason: "installed missing tool".into(),
         ref_: Some("abc1234".into()),
+        ..Default::default()
     });
     let mut dismissed = common::test_event("pc_01K000000000000000000000B", "invalid flag");
     dismissed.status = Status::Dismissed;
     dismissed.resolution = Some(Resolution {
         reason: "ordinary command usage".into(),
         ref_: None,
+        ..Default::default()
     });
     let mut open = common::test_event("pc_01K000000000000000000000C", "current problem");
     open.hypothesis = Some("maybe a race".into());
     open.resolution = Some(Resolution {
         reason: "stale resolution from reopening".into(),
         ref_: Some("old-ref".into()),
+        ..Default::default()
     });
     let mut candidate = common::test_event("pc_01K000000000000000000000D", "needs review");
     candidate.status = Status::Candidate;
@@ -42,6 +45,7 @@ fn active_reports_lead_and_terminal_reasons_explain_old_observations() {
     fixed_new.resolution = Some(Resolution {
         reason: "updated instructions".into(),
         ref_: Some("def5678".into()),
+        ..Default::default()
     });
     for mut event in [fixed_old, dismissed, open, candidate, fixed_new] {
         event.context.agent = Some("claude-code".into());

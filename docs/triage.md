@@ -93,3 +93,10 @@ observation with that version.
 Track the review loop through verified obstacles removed, recurrence after a
 fix, and time from report to resolution. Raw report counts depend on agent
 reporting diligence and have no denominator for all successful product usage.
+
+## Resolution commands
+
+Use `papercut close <id> --status fixed --reason "Verified fix" --ref <commit> --remedy docs`
+to record a verified resolution. Use `papercut stats` for resolution metrics.
+`triage-pack --since <days> --offset <count>` filters and pages reports.
+Product attribution and reports-only capture remain in effect.

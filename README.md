@@ -100,3 +100,10 @@ See [the usage guide](docs/USAGE.md) for commands, [the triage guide](docs/triag
 for the review loop, and [the plan](PLAN.md) for the architecture and implementation
 criteria. For development, run `cargo test` and
 `cargo clippy --all-targets -- -D warnings`.
+
+## Resolution commands
+
+Use `papercut close <id> --status fixed --reason "Verified fix" --ref <commit> --remedy docs`
+to record a verified resolution. Use `papercut stats` for resolution metrics.
+`triage-pack --since <days> --offset <count>` filters and pages reports.
+Product attribution and reports-only capture remain in effect.

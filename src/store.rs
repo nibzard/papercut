@@ -88,6 +88,20 @@ fn write_atomic_with_permissions(
     Ok(())
 }
 
+/// Write a private store file atomically. New files are owner-only. Existing
+/// files keep their stricter mode when possible.
+pub(crate) fn write_atomic_private(final_path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    write_atomic(final_path, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(final_path)?.permissions();
+        permissions.set_mode(permissions.mode() & 0o700);
+        std::fs::set_permissions(final_path, permissions)?;
+    }
+    Ok(())
+}
+
 /// Atomic update of a managed user file while preserving an existing symlink.
 /// Renaming over the link would disconnect a stowed instructions/settings file.
 pub(crate) fn write_managed_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
@@ -112,7 +126,7 @@ pub fn write_event(event: &Event) -> anyhow::Result<PathBuf> {
     let dir = events_dir().context("no home data dir: set $HOME or $XDG_DATA_HOME")?;
     let final_path = dir.join(format!("{}.json", event.id));
     let bytes = serde_json::to_vec_pretty(event).context("serialize event")?;
-    write_atomic(&final_path, &bytes)?;
+    write_atomic_private(&final_path, &bytes)?;
     Ok(final_path)
 }
 
@@ -168,8 +182,18 @@ pub fn read_events_by_ids(ids: &[String]) -> (Vec<Event>, Vec<SkippedFile>) {
 fn read_events_in(dir: PathBuf) -> (Vec<Event>, Vec<SkippedFile>) {
     let mut events = Vec::new();
     let mut skipped = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return (events, skipped);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (events, skipped),
+        Err(error) => {
+            skipped.push(SkippedFile {
+                file: dir.to_string_lossy().into_owned(),
+                reason: format!("cannot read events directory: {error}"),
+                repo: None,
+                product: None,
+            });
+            return (events, skipped);
+        }
     };
     for entry in entries.flatten() {
         let path = entry.path();
@@ -304,7 +328,7 @@ pub fn write_config(cfg: &Config) -> anyhow::Result<()> {
     let bytes = serde_json::to_vec_pretty(cfg).context("serialize config")?;
     // Atomic: a torn config.json would lose install bookkeeping and make
     // doctor/uninstall misreport state.
-    write_atomic(&path, &bytes).context("write config.json")?;
+    write_atomic_private(&path, &bytes).context("write config.json")?;
     Ok(())
 }
 
@@ -322,12 +346,22 @@ pub struct Sweeps {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SweepMark {
-    /// Per-file progress: absolute session-file path → its mark. Every file
-    /// keeps its own offset, pending calls, and session context, so parallel
-    /// sessions never lose appended content and a call/output pair split
-    /// across sweeps is matched whenever the output arrives.
+    /// Per-file progress: session-file path relative to the harness sessions
+    /// root → its mark. Every file keeps its own offset, pending calls, and
+    /// session context, so parallel sessions never lose appended content and a
+    /// call/output pair split across sweeps is matched whenever the output
+    /// arrives. Relative keys survive a `$HOME` relocation; legacy absolute
+    /// keys are folded to relative on load (see `codex::relativize_legacy_keys`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub files: BTreeMap<String, FileMark>,
+
+    /// Explicit one-time scan for record shapes older adapters skipped. These
+    /// marks are separate from the normal tail offsets, so backfill cannot
+    /// disturb incremental capture or duplicate legacy direct-call signals.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub current_backfill_files: BTreeMap<String, FileMark>,
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub current_backfill_complete: bool,
 
     // Legacy single-file watermark, kept for read compatibility only.
     // `codex::sweep` folds these fields into `files` once, then clears them;
@@ -347,6 +381,10 @@ fn u64_is_zero(n: &u64) -> bool {
     *n == 0
 }
 
+fn bool_is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Sweep progress within one session file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FileMark {
@@ -358,6 +396,10 @@ pub struct FileMark {
     /// even after other files were swept in between.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pending_calls: BTreeMap<String, PendingCall>,
+    /// Processes that returned a session id and have not produced a terminal
+    /// result yet. Keyed by the command runner's numeric session id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub running_processes: BTreeMap<String, PendingCall>,
     /// The `session_meta` context seen in this file, so a resumed file still
     /// knows its session id / cwd / repo even though `session_meta` lives
     /// above the resume offset.
@@ -371,6 +413,11 @@ pub struct FileMark {
 pub struct PendingCall {
     pub cmd: String,
     pub ts: String,
+    /// A current `exec` call can contain several nested command invocations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<String>,
 }
 
 /// Session-level context extracted from `session_meta`, cached in the watermark
@@ -406,7 +453,7 @@ pub fn write_sweeps(s: &Sweeps) -> anyhow::Result<()> {
     let bytes = serde_json::to_vec_pretty(s).context("serialize sweeps")?;
     // Atomic so a torn write cannot corrupt the watermark file — a corrupt
     // sweeps.json falls back to defaults and re-sweeps all history.
-    write_atomic(&path, &bytes).context("write sweeps.json")?;
+    write_atomic_private(&path, &bytes).context("write sweeps.json")?;
     Ok(())
 }
 

@@ -36,6 +36,7 @@ fn show_displays_every_stored_field_without_changing_event() {
     event.resolution = Some(Resolution {
         reason: "Pinned the tool".into(),
         ref_: Some("def5678".into()),
+        ..Default::default()
     });
     let path = papercut::store::write_event(&event).unwrap();
     let before = std::fs::read(&path).unwrap();

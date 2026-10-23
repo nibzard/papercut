@@ -26,6 +26,8 @@ fn pack_full(repo: &str, status: Option<Status>, max_tokens: u32) -> (String, Va
         unattributed: true,
         status,
         max_tokens,
+        since: None,
+        offset: 0,
     }) {
         RunResult::Ok { text, data } => (text, data),
         RunResult::Health { .. } => panic!("triage-pack unexpectedly returned Health"),
@@ -45,6 +47,7 @@ fn seed() {
     e2.resolution = Some(Resolution {
         reason: "pinned dep".into(),
         ref_: Some("abc1234".into()),
+        ..Default::default()
     });
     papercut::store::write_event(&e1).unwrap();
     papercut::store::write_event(&e2).unwrap();
@@ -202,6 +205,7 @@ fn pack_preserves_terminal_resolution_but_hides_it_after_reopening() {
     reopened.resolution = Some(Resolution {
         reason: "previous mitigation".into(),
         ref_: Some("old-reference".into()),
+        ..Default::default()
     });
     papercut::store::write_event(&reopened).unwrap();
     let md = pack("all", None, 12_000);
@@ -691,4 +695,55 @@ fn events_win_budget_over_skipped_detail() {
     );
     // The total count rides in the source line regardless of budget.
     assert!(md.contains("skipped file(s)"), "count in source line: {md}");
+}
+
+#[test]
+fn since_and_offset_filter_and_page_both_channels() {
+    let _env = IsolatedEnv::new();
+    let mut recent_a = common::test_event("pc_01K0000000000000000000001", "recent a");
+    recent_a.created_at = "2099-01-01T00:00:00Z".into();
+    let mut recent_b = common::test_event("pc_01K0000000000000000000002", "recent b");
+    recent_b.created_at = "2099-01-02T00:00:00Z".into();
+    let mut old = common::test_event("pc_01K0000000000000000000003", "old event");
+    old.created_at = "2020-01-01T00:00:00Z".into();
+    for event in [&recent_a, &recent_b, &old] {
+        papercut::store::write_event(event).unwrap();
+    }
+    for (session, command) in [("s1", "cargo test"), ("s2", "npm test")] {
+        append_signal(
+            "codex",
+            session,
+            &Signal::new(
+                "2099-01-01T00:00:00Z",
+                None,
+                None,
+                Some("codex".into()),
+                command,
+                1,
+                Some("failed"),
+                Some(session.into()),
+            ),
+        )
+        .unwrap();
+    }
+
+    let data = match triage_pack::run(TriagePackArgs {
+        product: None,
+        unattributed: true,
+        repo: Some("all".into()),
+        status: None,
+        max_tokens: 12_000,
+        since: Some(1),
+        offset: 1,
+    }) {
+        RunResult::Ok { data, .. } => data,
+        other => panic!("triage-pack failed: {other:?}"),
+    };
+    assert_eq!(data["events"], 2, "the old event is filtered out");
+    assert_eq!(data["signal_clusters"], 2);
+    assert_eq!(data["included_events"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        data["included_signal_clusters"].as_array().unwrap().len(),
+        1
+    );
 }

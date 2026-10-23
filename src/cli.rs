@@ -27,7 +27,9 @@ use crate::output::OutputMode;
                   $ papercut install --yes\n\
                   $ papercut doctor\n\
                   $ papercut triage-pack --product my-sdk --max-tokens 8000\n\
-                  $ papercut list --unattributed"
+                  $ papercut list --unattributed\n\
+                  $ papercut close pc_01K... --status fixed --reason 'fixed config' --ref abc1234 --remedy docs\n\
+                  $ papercut stats"
 )]
 pub struct Cli {
     /// Output mode. `json` emits the stable envelope; `text` (default) is terse.
@@ -67,9 +69,19 @@ pub enum Command {
     /// Emit product observations or historical unattributed evidence for triage.
     TriagePack(TriagePackArgs),
 
-    /// Hidden: stale-hook compatibility entry point. Silent, no capture.
-    #[command(name = "_hook", hide = true)]
-    Hook(HookArgs),
+    /// Close one event with a verified disposition and resolution record.
+    Close(CloseArgs),
+
+    /// Show resolution health metrics from the private store.
+    Stats,
+    // NOTE: the live `_hook` entry point is intentionally NOT a clap subcommand.
+    // main.rs intercepts `_hook` before clap parses argv, because corrupted
+    // harness wiring can invoke it with bad args and that must never reach
+    // clap's usage-error path. Declaring it here (even `hide = true`) leaks its
+    // name into clap's subcommand-enumeration and near-miss suggestions, which
+    // then flow into the JSON envelope — violating the contract that the
+    // internal hook name never reaches an agent. `HookArgs` + `commands::hook`
+    // serve the pre-clap intercept directly.
 }
 
 #[derive(clap::Args)]
@@ -191,6 +203,10 @@ pub struct SweepArgs {
     /// Validate a comma-separated list of known harness ids; no scanning occurs.
     #[arg(long)]
     pub harness: Option<String>,
+
+    /// Re-read only record shapes older papercut versions could not capture.
+    #[arg(long)]
+    pub backfill_current: bool,
 }
 
 #[derive(clap::Args)]
@@ -214,6 +230,36 @@ pub struct TriagePackArgs {
     /// Soft token budget for the bundle (approx chars/4). Default ~12k.
     #[arg(long, default_value_t = 12_000)]
     pub max_tokens: u32,
+
+    /// Only include events and signals from the last N days.
+    #[arg(long)]
+    pub since: Option<u32>,
+
+    /// Skip this many matching events and signal clusters for pagination.
+    #[arg(long, default_value_t = 0)]
+    pub offset: usize,
+}
+
+#[derive(clap::Args)]
+pub struct CloseArgs {
+    /// Event identifier to close.
+    pub id: String,
+
+    /// Terminal disposition.
+    #[arg(long, value_enum)]
+    pub status: Status,
+
+    /// Verified reason for the disposition.
+    #[arg(long)]
+    pub reason: String,
+
+    /// Commit, issue, documentation, or system reference. Required for fixed.
+    #[arg(long, name = "ref")]
+    pub ref_: Option<String>,
+
+    /// Remedy class used for health metrics.
+    #[arg(long, value_enum)]
+    pub remedy: crate::model::Remedy,
 }
 
 #[derive(clap::Args)]

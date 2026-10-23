@@ -158,3 +158,10 @@ Every command accepts `--output json` and uses this envelope:
 `retryable` flag, and a bounded `hint`. Exit 0 means success, exit 1 means a
 real failure, and exit 2 means a usage error. The envelope version is
 independent of the event file schema version.
+
+## Resolution commands
+
+Use `papercut close <id> --status fixed --reason "Verified fix" --ref <commit> --remedy docs`
+to record a verified resolution. Use `papercut stats` for resolution metrics.
+`triage-pack --since <days> --offset <count>` filters and pages reports.
+Product attribution and reports-only capture remain in effect.

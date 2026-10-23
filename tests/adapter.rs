@@ -14,7 +14,9 @@ fn hook(payload: &[u8]) {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(payload).unwrap();
+    if let Err(error) = child.stdin.take().unwrap().write_all(payload) {
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
     let out = child.wait_with_output().unwrap();
     assert_eq!(out.status.code(), Some(0));
     assert!(out.stdout.is_empty());

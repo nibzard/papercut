@@ -56,6 +56,7 @@ pub fn run(args: TriagePackArgs) -> RunResult {
     let (mut events, skipped) = crate::query::load(&Filters {
         scope: scope.clone(),
         product: selected.clone(),
+        since_days: args.since,
         ..Default::default()
     });
     // Default triage focus: open + candidate. An explicit --status overrides.
@@ -67,10 +68,15 @@ pub fn run(args: TriagePackArgs) -> RunResult {
     // F6: cluster only the signals that fall under the same repo scope, so a
     // `--repo .` pack does not pull in recurrence from unrelated repositories.
     let clusters = if args.unattributed {
-        cluster_signals(&scope)
+        cluster_signals(&scope, args.since)
     } else {
         Vec::new()
     };
+    let total_events = events.len();
+    let total_clusters = clusters.len();
+    events.reverse();
+    let events: Vec<_> = events.into_iter().skip(args.offset).collect();
+    let clusters: Vec<_> = clusters.into_iter().skip(args.offset).collect();
     let pack = build_pack(
         &scope,
         &selected,
@@ -85,10 +91,14 @@ pub fn run(args: TriagePackArgs) -> RunResult {
         data: json!({
             "bytes": pack.markdown.len(),
             "markdown": &pack.markdown,
-            "events": events.len(),
+            "events": total_events,
+            "offset": args.offset,
+            "since_days": args.since,
+            "included_events": &events[..pack.events_included],
             "events_included": pack.events_included,
             "events_omitted": events.len() - pack.events_included,
-            "signal_clusters": clusters.len(),
+            "signal_clusters": total_clusters,
+            "included_signal_clusters": clusters.iter().take(pack.signal_clusters_included).map(|cluster| json!({"key": cluster.key, "count": cluster.count, "repos": cluster.repos, "agents": cluster.agents, "sessions": cluster.sessions.len(), "first_ts": cluster.first_seen, "last_ts": cluster.last_seen})).collect::<Vec<_>>(),
             "signal_clusters_included": pack.signal_clusters_included,
             "signal_clusters_omitted": clusters.len() - pack.signal_clusters_included,
             "legacy_excluded": legacy_excluded,
@@ -124,16 +134,25 @@ struct Example {
     stderr: Option<String>,
 }
 
-fn cluster_signals(scope: &RepoScope) -> Vec<Cluster> {
+fn cluster_signals(scope: &RepoScope, since_days: Option<u32>) -> Vec<Cluster> {
+    let cutoff = since_days
+        .map(|days| crate::time::now_unix().saturating_sub(u64::from(days).saturating_mul(86_400)));
     let mut map: BTreeMap<String, Cluster> = BTreeMap::new();
     for h in SIGNAL_HARNESSES {
         let (sigs, _skip) = read_signals(h);
         for s in sigs {
+            if cutoff.is_some_and(|cutoff| {
+                crate::time::parse_rfc3339_unix(&s.ts).is_some_and(|time| time < cutoff)
+            }) {
+                continue;
+            }
             // Honor the repo scope: under `One(r)` only signals attributed to
             // that repo cluster. Signals with no repo are unattributable and are
             // excluded from a scoped pack (they still appear under `All`).
             if let RepoScope::One(r) = scope {
-                if s.repo.as_deref() != Some(r.as_str()) {
+                if !s.repo.as_deref().is_some_and(|repo| {
+                    crate::query::repo_matches(repo, r, Some(&crate::git_meta::normalize_remote(r)))
+                }) {
                     continue;
                 }
             }

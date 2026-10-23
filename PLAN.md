@@ -519,3 +519,10 @@ preserved without invented attribution; and recurrence checked against fix versi
   history. Dual-version reads and separate config/envelope versions are release gates.
 - **Unreviewed evidence:** collection produces value only when it informs a product
   decision and the resulting usage path is checked again.
+
+## Resolution commands
+
+Use `papercut close <id> --status fixed --reason "Verified fix" --ref <commit> --remedy docs`
+to record a verified resolution. Use `papercut stats` for resolution metrics.
+`triage-pack --since <days> --offset <count>` filters and pages reports.
+Product attribution and reports-only capture remain in effect.

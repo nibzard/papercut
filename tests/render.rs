@@ -88,6 +88,7 @@ fn resolution_ref_is_rendered() {
     e.resolution = Some(Resolution {
         reason: "pinned dep".into(),
         ref_: Some("abc1234".into()),
+        ..Default::default()
     });
     let md = render_markdown(&RepoScope::All, std::slice::from_ref(&e));
     assert!(md.contains("resolved: pinned dep (`abc1234`)"));
