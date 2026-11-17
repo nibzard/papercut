@@ -53,7 +53,7 @@ fn block_upsert_is_idempotent_and_preserves_user_content() {
     let after = std::fs::read_to_string(env.home.join(".claude/CLAUDE.md")).unwrap();
     assert!(after.contains("# My rules"), "user heading preserved");
     assert!(after.contains("Do good work."), "user body preserved");
-    assert!(after.contains("papercut:begin v2"));
+    assert!(after.contains("papercut:begin v4"));
     assert_eq!(after.matches("papercut:begin").count(), 1);
     let len1 = after.len();
 
@@ -474,7 +474,7 @@ fn doctor_flags_stale_block_version() {
     let p = env.home.join(".claude/CLAUDE.md");
     let c = std::fs::read_to_string(&p)
         .unwrap()
-        .replace("papercut:begin v2", "papercut:begin v0");
+        .replace("papercut:begin v4", "papercut:begin v0");
     std::fs::write(&p, c).unwrap();
 
     let data = doctor_data();
@@ -493,6 +493,49 @@ fn doctor_flags_stale_block_version() {
         .find(|c| c["name"] == "block:claude-code")
         .unwrap();
     assert_eq!(block_check["hint"], "run: papercut install --yes");
+}
+
+/// The unreleased fix/triage-output-and-template branch wrote v3 blocks with
+/// the old "Log papercuts" text. They must read as stale and be replaced.
+#[test]
+fn doctor_flags_branch_v3_block_and_install_replaces_it() {
+    let env = IsolatedEnv::new().with_claude();
+    let p = env.home.join(".claude/CLAUDE.md");
+    std::fs::write(
+        &p,
+        "# Mine\n<!-- papercut:begin v3 -->\n### Log papercuts\nold body\n<!-- papercut:end -->\n",
+    )
+    .unwrap();
+
+    assert!(!check_ok(&doctor_data(), "block:claude-code"));
+
+    install(true, None);
+    let after = std::fs::read_to_string(&p).unwrap();
+    assert!(after.contains("# Mine"));
+    assert!(after.contains("papercut:begin v4"));
+    assert!(!after.contains("Log papercuts"));
+    assert!(check_ok(&doctor_data(), "block:claude-code"));
+}
+
+/// Sweep is suspended, so missing or old Codex sweep state is expected and
+/// must not make doctor unhealthy or suggest a command that cannot fix it.
+#[test]
+fn doctor_healthy_with_codex_and_no_sweep_state() {
+    let _env = IsolatedEnv::new().with_codex();
+    install(true, None);
+
+    let data = doctor_data();
+    assert_eq!(data["healthy"], true, "doctor: {data:#}");
+    for name in ["adapter:codex:freshness", "adapter:codex:format"] {
+        let c = data["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("missing check {name}"));
+        assert_eq!(c["ok"], true, "{name}");
+        assert_eq!(c["hint"], "", "{name} must not suggest a remedy");
+    }
 }
 
 #[test]
@@ -766,7 +809,7 @@ fn harness_filter_restricts_install_and_uninstall() {
 
     // claude-code got the block; codex's file was never created/touched.
     let claude_md = std::fs::read_to_string(env.home.join(".claude/CLAUDE.md")).unwrap();
-    assert!(claude_md.contains("papercut:begin v2"));
+    assert!(claude_md.contains("papercut:begin v4"));
     let codex_md = std::fs::read_to_string(env.home.join(".codex/AGENTS.md")).unwrap_or_default();
     assert!(
         !codex_md.contains("papercut"),

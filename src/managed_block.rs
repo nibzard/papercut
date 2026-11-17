@@ -2,7 +2,7 @@
 //! instruction inside a harness's global instructions file.
 //!
 //! Invariant: `install`/`uninstall` only ever touch the whole-line span
-//! between `<!-- papercut:begin v2 -->` and `<!-- papercut:end -->`. Content
+//! between `<!-- papercut:begin v4 -->` and `<!-- papercut:end -->`. Content
 //! outside those markers is preserved byte-for-byte.
 //!
 //! Accepted limitation: inserting into a file whose last line has no trailing
@@ -17,8 +17,9 @@ pub enum Action {
     Unchanged,
 }
 
-/// Current managed-block version.
-pub const BLOCK_VERSION: u32 = 2;
+/// Current managed-block version. v3 was used by the unreleased
+/// fix/triage-output-and-template branch; skip it so every older block is stale.
+pub const BLOCK_VERSION: u32 = 4;
 
 /// The begin marker carries the version so `doctor` can detect staleness.
 pub fn begin_marker(version: u32) -> String {

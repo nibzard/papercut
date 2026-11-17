@@ -341,47 +341,43 @@ fn check_store_permissions() -> Check {
     }
 }
 
+/// Informational while sweep is suspended: stale sweep state is expected,
+/// and `papercut sweep` cannot refresh it.
 fn check_codex_freshness() -> Check {
     let age_days = crate::store::sweeps_path()
         .and_then(|path| std::fs::metadata(path).ok())
         .and_then(|metadata| metadata.modified().ok())
         .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
         .map(|age| age.as_secs() / 86_400);
-    let ok = age_days.is_some_and(|days| days <= 7);
     Check {
         name: "adapter:codex:freshness".into(),
-        ok,
+        ok: true,
         detail: age_days
-            .map(|days| format!("last sweep state update {days} day(s) ago"))
-            .unwrap_or_else(|| "no sweep state found".into()),
-        hint: if ok {
-            String::new()
-        } else {
-            "run: papercut sweep; schedule it periodically with cron or a user timer".into()
-        },
+            .map(|days| {
+                format!(
+                    "not applicable: sweep suspended; last sweep state update {days} day(s) ago"
+                )
+            })
+            .unwrap_or_else(|| "not applicable: sweep suspended; no sweep state found".into()),
+        hint: String::new(),
     }
 }
 
+/// Informational while sweep is suspended: no capture path reads Codex logs,
+/// so a format gap has nothing to break and no remedy to suggest.
 fn check_codex_format() -> Check {
     let coverage = crate::adapters::codex::coverage_probe();
-    let ok = coverage.unsupported_exec_records == 0;
     Check {
         name: "adapter:codex:format".into(),
-        ok,
+        ok: true,
         detail: format!(
-            "{} supported exec record(s), {} unsupported exec record(s); {} observable and {} opaque custom result(s) in recent logs",
+            "informational: {} supported exec record(s), {} unsupported exec record(s); {} observable and {} opaque custom result(s) in recent logs",
             coverage.supported_exec_records,
             coverage.unsupported_exec_records,
             coverage.observable_custom_results,
             coverage.opaque_custom_results,
         ),
-        hint: if !ok {
-            "update papercut's Codex adapter against the installed log format".into()
-        } else if coverage.opaque_custom_results > 0 {
-            "Codex omitted child exit codes from some custom results; run papercut install --yes to refresh the result-preservation instruction".into()
-        } else {
-            String::new()
-        },
+        hint: String::new(),
     }
 }
 

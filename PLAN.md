@@ -292,7 +292,7 @@ The global instruction introduces the reporting capability. A task or product
 instruction supplies the target. The planned managed block is:
 
 ```markdown
-<!-- papercut:begin v2 -->
+<!-- papercut:begin v4 -->
 ### Observe designated products with Papercut
 When a task or applicable instructions designate a product to observe, record
 where using its installation, docs, public interface, behavior, or errors causes

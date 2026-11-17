@@ -309,7 +309,7 @@ fn upgrade_preserves_stowed_symlinks_and_unrelated_hook() {
     );
     assert!(std::fs::read_to_string(&instructions_target)
         .unwrap()
-        .contains("papercut:begin v2"));
+        .contains("papercut:begin v4"));
     let settings: Value =
         serde_json::from_slice(&std::fs::read(&settings_target).unwrap()).unwrap();
     assert_eq!(settings["model"], "opus");
