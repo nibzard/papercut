@@ -1,3 +1,7 @@
+---
+oak:
+  kind: spec
+---
 # MeasureTwice opportunity in triage
 
 Papercut collects observations. During Layer 3 triage, an agent proposes shared

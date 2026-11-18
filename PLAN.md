@@ -1,3 +1,7 @@
+---
+oak:
+  kind: spec
+---
 # papercut — understand how agents struggle to use your products
 
 Direction agreed on 2026-09-29. The product attribution, product views, and

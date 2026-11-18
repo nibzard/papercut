@@ -1,3 +1,7 @@
+---
+oak:
+  kind: record
+---
 # Product usage pilot: Papercut CLI
 
 On 2026-09-29, a prior agent report supplied a concrete Papercut CLI usage

@@ -1,3 +1,10 @@
+---
+oak:
+  kind: record
+  at: 2026-08-04
+  status: superseded
+  superseded_by: review-2026-08-06.md
+---
 # PLAN.md implementation review
 
 > **Superseded (2026-08-06).** The criticals and contract gaps below were

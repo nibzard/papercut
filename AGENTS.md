@@ -47,3 +47,7 @@ first (with agreement), then the code.
 - Tests that touch the store or instructions files run against a fake `$HOME` /
   `$XDG_DATA_HOME` — never the real one.
 - `render` output must be deterministic: same events in, byte-identical markdown out.
+
+Memory lives in knowledge/ and follows OAK-0001
+(https://oakspec.dev/oak-0001.txt). Start at knowledge/index.md.
+Read and write it by those rules.
